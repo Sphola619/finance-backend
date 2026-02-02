@@ -109,10 +109,10 @@ const YAHOO_HEATMAP_SYMBOLS = {
   "GBP/ZAR": "GBPZAR=X",
   "AUD/USD": "AUDUSD=X",
   "USD/CHF": "USDCHF=X",
-  Gold: "GLD",
-  Silver: "SLV",
-  Platinum: "PPLT",
-  "Crude Oil": "USO"
+  Gold: "GC=F",        // ✅ Changed from ETF (GLD) to futures
+  Silver: "SI=F",      // ✅ Changed from ETF (SLV) to futures
+  Platinum: "PL=F",    // ✅ Changed from ETF (PPLT) to futures
+  "Crude Oil": "CL=F"  // ✅ Changed from ETF (USO) to futures
 };
 
 // ✅ Correlation Matrix Assets
@@ -358,7 +358,7 @@ app.get("/api/forex-strength", async (req, res) => {
 });
 
 /* ------------------------------------------------------
-   COMMODITIES
+   COMMODITIES - Yahoo Finance with Extended History ✅
 ------------------------------------------------------ */
 app.get("/api/commodities", async (req, res) => {
   try {
@@ -369,7 +369,8 @@ app.get("/api/commodities", async (req, res) => {
 
     for (const [name, symbol] of Object.entries(YAHOO_COMMODITY_SYMBOLS)) {
       try {
-        const url = `${YAHOO_CHART}/${symbol}?interval=1d&range=5d`;
+        // Fetch 10 days of data to ensure we have valid comparison points
+        const url = `${YAHOO_CHART}/${symbol}?interval=1d&range=10d`;
         const r = await http.get(url);
         const data = r.data.chart?.result?.[0];
 
@@ -381,7 +382,7 @@ app.get("/api/commodities", async (req, res) => {
         const closes = data.indicators.quote[0].close.filter(n => typeof n === "number");
 
         if (closes.length < 2) {
-          console.warn(`⚠️ Insufficient data for ${name}`);
+          console.warn(`⚠️ Insufficient data for ${name}: only ${closes.length} data points`);
           continue;
         }
 
@@ -389,7 +390,7 @@ app.get("/api/commodities", async (req, res) => {
         const previousPrice = closes.at(-2);
 
         if (isNaN(currentPrice) || isNaN(previousPrice) || previousPrice === 0) {
-          console.warn(`⚠️ Invalid prices for ${name}`);
+          console.warn(`⚠️ Invalid prices for ${name}: current=${currentPrice}, previous=${previousPrice}`);
           continue;
         }
 
@@ -424,7 +425,7 @@ app.get("/api/commodities", async (req, res) => {
     commoditiesCacheTime = Date.now();
     res.json(results);
 
-    console.log(`✅ Loaded ${results.length} commodities (Yahoo Futures)`);
+    console.log(`✅ Loaded ${results.length} commodities (Yahoo Finance)`);
 
   } catch (err) {
     console.error("❌ /api/commodities error:", err.message);
@@ -812,7 +813,7 @@ app.get("/api/forex-heatmap", async (req, res) => {
           const r = await http.get(url);
           const data = r.data.chart?.result?.[0];
 
-          if (data) {
+          if (data && data.indicators?.quote?.[0]?.close) {
             const closes = data.indicators.quote[0].close.filter(n => typeof n === "number");
 
             if (closes.length >= 2) {
@@ -825,6 +826,24 @@ app.get("/api/forex-heatmap", async (req, res) => {
               if (Math.abs(compareIndex) <= closes.length) {
                 const current = closes.at(-1);
                 const previous = closes.at(compareIndex);
+                pct = ((current - previous) / previous) * 100;
+              }
+            }
+          }
+
+          // ✅ Fallback for 1h: if no data with 5m, try 15m interval
+          if (pct === null && tf === "1h") {
+            const fallbackUrl = `${YAHOO_CHART}/${symbol}?interval=15m&range=5d`;
+            const fallbackR = await http.get(fallbackUrl);
+            const fallbackData = fallbackR.data.chart?.result?.[0];
+
+            if (fallbackData && fallbackData.indicators?.quote?.[0]?.close) {
+              const fallbackCloses = fallbackData.indicators.quote[0].close.filter(n => typeof n === "number");
+              
+              // For 1h with 15m intervals, we need 4 data points (4 x 15min = 60min)
+              if (fallbackCloses.length >= 5) {
+                const current = fallbackCloses.at(-1);
+                const previous = fallbackCloses.at(-5); // 1 hour ago (4 intervals)
                 pct = ((current - previous) / previous) * 100;
               }
             }
@@ -893,7 +912,7 @@ app.get("/api/crypto-heatmap", async (req, res) => {
           const r = await http.get(url);
           const data = r.data.chart?.result?.[0];
 
-          if (data) {
+          if (data && data.indicators?.quote?.[0]?.close) {
             const closes = data.indicators.quote[0].close.filter(n => typeof n === "number");
 
             if (closes.length >= 2) {
