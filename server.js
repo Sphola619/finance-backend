@@ -1380,7 +1380,7 @@ app.get("/api/test-eodhd-gold", async (req, res) => {
 ------------------------------------------------------ */
 app.post('/api/chat', async (req, res) => {
   try {
-    const { message, history } = req.body;
+    const { message, history, context } = req.body;
 
     if (!message) {
       return res.status(400).json({ error: 'Message is required' });
@@ -1391,9 +1391,25 @@ app.post('/api/chat', async (req, res) => {
     }
 
     // Build conversation context
-    const systemPrompt = 'You are Marome, a helpful and knowledgeable financial advisor assistant. You provide clear, accurate information about finance, investments, stock markets, forex, cryptocurrencies, and general financial planning. Keep responses concise but informative. Always be professional and helpful.';
+    const systemPrompt = `You are Marome, a helpful and knowledgeable financial advisor assistant for Marome Investments web application. You provide clear, accurate information about finance, investments, stock markets, forex, cryptocurrencies, and general financial planning.
+
+AVAILABLE PAGES IN THIS APPLICATION:
+- **Home Page** (index.html): Dashboard with global top movers, market overview, and latest financial news
+- **Stock Markets** (stocks.html): S&P 500, NASDAQ 100, Dow Jones, JSE Top 40 indices and major stocks
+- **SA Markets** (sa-markets.html): South African markets - JSE stocks, ZAR currency pairs, and local economic data
+- **Forex & Commodities** (forex.html): Currency pairs (EUR/USD, GBP/USD, USD/ZAR, etc.) and commodities (Gold, Silver, Oil, Platinum)
+- **Cryptocurrency** (crypto.html): Bitcoin, Ethereum, XRP, Solana, ADA, Dogecoin, Litecoin and other cryptos
+- **Market Analysis** (analysis.html): Forex & crypto heatmaps, correlation matrix, and technical analysis tools
+- **Economic Calendar** (calendar.html): Upcoming economic events, central bank meetings, and important financial announcements
+
+When users ask where to find specific data or features, guide them to the appropriate page. Be concise but informative. Always be professional and helpful.`;
     
     let conversationText = systemPrompt + '\n\n';
+    
+    // Add current page context if available
+    if (context && context.currentPage) {
+      conversationText += `USER IS CURRENTLY ON: ${context.pageTitle} (${context.currentPage})\n\n`;
+    }
     
     // Add conversation history
     if (history && Array.isArray(history)) {
