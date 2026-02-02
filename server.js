@@ -28,6 +28,7 @@ const EODHD_KEY = process.env.EODHD_API_KEY;
 const TWELVEDATA_KEY = process.env.TWELVEDATA_API_KEY;
 const FINNHUB_KEY = process.env.FINNHUB_API_KEY;
 const FMP_KEY = process.env.FMP_API_KEY;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const PORT = process.env.PORT || 5000;
 
 /* ------------------------------------------------------
@@ -1375,10 +1376,70 @@ app.get("/api/test-eodhd-gold", async (req, res) => {
 });
 
 /* ------------------------------------------------------
+   MAROME AI CHAT ENDPOINT
+------------------------------------------------------ */
+app.post('/api/chat', async (req, res) => {
+  try {
+    const { message, history } = req.body;
+
+    if (!message) {
+      return res.status(400).json({ error: 'Message is required' });
+    }
+
+    if (!GEMINI_API_KEY) {
+      return res.status(500).json({ error: 'Gemini API key not configured' });
+    }
+
+    // Build conversation context
+    const systemPrompt = 'You are Marome, a helpful and knowledgeable financial advisor assistant. You provide clear, accurate information about finance, investments, stock markets, forex, cryptocurrencies, and general financial planning. Keep responses concise but informative. Always be professional and helpful.';
+    
+    let conversationText = systemPrompt + '\n\n';
+    
+    // Add conversation history
+    if (history && Array.isArray(history)) {
+      history.forEach(msg => {
+        conversationText += `${msg.role === 'user' ? 'User' : 'Marome'}: ${msg.content}\n\n`;
+      });
+    }
+    
+    conversationText += `User: ${message}\n\nMarome:`;
+
+    // Call Gemini API
+    const geminiResponse = await axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        contents: [{
+          parts: [{
+            text: conversationText
+          }]
+        }],
+        generationConfig: {
+          temperature: 0.7,
+          maxOutputTokens: 500,
+          topP: 0.8,
+          topK: 40
+        }
+      }
+    );
+
+    const aiResponse = geminiResponse.data.candidates[0].content.parts[0].text;
+
+    res.json({ response: aiResponse });
+  } catch (error) {
+    console.error('Gemini API Error:', error.response?.data || error.message);
+    res.status(500).json({ 
+      error: 'Failed to get AI response',
+      details: error.response?.data?.error?.message || error.message
+    });
+  }
+});
+
+/* ------------------------------------------------------
    START SERVER
 ------------------------------------------------------ */
 app.listen(PORT, () => {
   console.log(`🚀 Marome Backend running on port ${PORT}`);
   console.log(`📊 Correlation Matrix API: http://localhost:${PORT}/api/correlation-matrix?period=30`);
   console.log(`🧪 EODHD Test: http://localhost:${PORT}/api/test-eodhd-gold`);
+  console.log(`💬 Marome Chat AI: http://localhost:${PORT}/api/chat`);
 });
