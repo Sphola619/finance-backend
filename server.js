@@ -35,10 +35,10 @@ const PORT = process.env.PORT || 5000;
 /* ------------------------------------------------------
    CACHES
 ------------------------------------------------------ */
-const MOVERS_CACHE_TTL = 2 * 60 * 1000;
-const GENERIC_TTL = 60 * 1000;
-const HEATMAP_TTL = 5 * 60 * 1000;
-const CALENDAR_TTL = 6 * 60 * 60 * 1000;
+const MOVERS_CACHE_TTL = 10 * 60 * 1000; // 10 minutes (was 2)
+const GENERIC_TTL = 5 * 60 * 1000; // 5 minutes (was 1)
+const HEATMAP_TTL = 15 * 60 * 1000; // 15 minutes (was 5)
+const CALENDAR_TTL = 6 * 60 * 60 * 1000; // 6 hours
 const CORRELATION_TTL = 60 * 60 * 1000; // 1 hour
 
 let moversCache = null;
@@ -418,7 +418,7 @@ app.get("/api/commodities", async (req, res) => {
         console.warn(`⚠️ ${name} fetch error:`, err.message);
       }
 
-      await sleep(200);
+      await sleep(400);
     }
 
     results.sort((a, b) => Math.abs(b.rawChange) - Math.abs(a.rawChange));
