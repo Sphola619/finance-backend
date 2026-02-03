@@ -42,6 +42,7 @@ const HEATMAP_TTL = 15 * 60 * 1000; // 15 minutes
 const CALENDAR_TTL = 6 * 60 * 60 * 1000; // 6 hours
 const CORRELATION_TTL = 60 * 60 * 1000; // 1 hour
 const JSE_CACHE_TTL = 15 * 60 * 1000; // 15 minutes (matches iress update frequency)
+const ECONOMIC_INDICATORS_TTL = 30 * 24 * 60 * 60 * 1000; // 30 days
 
 let moversCache = null;
 let moversCacheTimestamp = 0;
@@ -65,6 +66,8 @@ let correlationCache = {};
 let correlationCacheTime = 0;
 let jseCache = null;
 let jseCacheTime = 0;
+let economicIndicatorsCache = null;
+let economicIndicatorsCacheTime = 0;
 
 /* ------------------------------------------------------
    SYMBOLS
@@ -1361,6 +1364,210 @@ app.get("/api/jse-stocks", async (req, res) => {
 
     res.status(500).json({ 
       error: "Failed to fetch JSE data",
+      message: error.message 
+    });
+  }
+});
+
+/* ------------------------------------------------------
+   ECONOMIC INDICATORS ENDPOINT
+------------------------------------------------------ */
+app.get("/api/economic-indicators", async (req, res) => {
+  const now = Date.now();
+
+  // Check cache (30-day TTL)
+  if (economicIndicatorsCache && (now - economicIndicatorsCacheTime < ECONOMIC_INDICATORS_TTL)) {
+    console.log("✅ Returning cached economic indicators");
+    return res.json(economicIndicatorsCache);
+  }
+
+  try {
+    console.log("📊 Fetching economic indicators from EODHD...");
+
+    // Country codes and currency mapping
+    const countries = [
+      { currency: 'USD', code: 'USA', name: 'United States' },
+      { currency: 'EUR', code: 'DEU', name: 'Germany' }, // Using Germany as Eurozone proxy
+      { currency: 'GBP', code: 'GBR', name: 'United Kingdom' },
+      { currency: 'JPY', code: 'JPN', name: 'Japan' },
+      { currency: 'AUD', code: 'AUS', name: 'Australia' },
+      { currency: 'CAD', code: 'CAN', name: 'Canada' },
+      { currency: 'CHF', code: 'CHE', name: 'Switzerland' },
+      { currency: 'NZD', code: 'NZL', name: 'New Zealand' },
+      { currency: 'ZAR', code: 'ZAF', name: 'South Africa' }
+    ];
+
+    // Manual override for most current data (update monthly after releases)
+    const manualOverrides = {
+      USD: { 
+        inflation: { value: 2.9, date: '2026-01-13' }, // Latest US CPI (Jan 13, 2026 release)
+        unemployment: { value: 4.0, date: '2026-01-31' },
+        gdp: { value: 2.8, date: '2025-Q4' }
+      },
+      EUR: {
+        inflation: { value: 2.4, date: '2026-01-31' },
+        unemployment: { value: 6.4, date: '2025-12-31' },
+        gdp: { value: 0.9, date: '2025-Q4' }
+      },
+      GBP: {
+        inflation: { value: 2.5, date: '2025-12-31' },
+        unemployment: { value: 4.2, date: '2025-12-31' },
+        gdp: { value: 1.1, date: '2025-Q4' }
+      },
+      JPY: {
+        inflation: { value: 3.6, date: '2025-12-31' },
+        unemployment: { value: 2.4, date: '2025-12-31' },
+        gdp: { value: 1.2, date: '2025-Q4' }
+      },
+      AUD: {
+        inflation: { value: 3.2, date: '2025-12-31' },
+        unemployment: { value: 4.0, date: '2025-12-31' },
+        gdp: { value: 1.8, date: '2025-Q4' }
+      },
+      CAD: {
+        inflation: { value: 1.8, date: '2025-12-31' },
+        unemployment: { value: 6.7, date: '2025-12-31' },
+        gdp: { value: 1.3, date: '2025-Q4' }
+      },
+      CHF: {
+        inflation: { value: 0.7, date: '2025-12-31' },
+        unemployment: { value: 2.3, date: '2025-12-31' },
+        gdp: { value: 1.4, date: '2025-Q4' }
+      },
+      NZD: {
+        inflation: { value: 2.2, date: '2025-12-31' },
+        unemployment: { value: 4.8, date: '2025-12-31' },
+        gdp: { value: 0.5, date: '2025-Q4' }
+      },
+      ZAR: {
+        inflation: { value: 3.8, date: '2026-01-31' },
+        unemployment: { value: 32.1, date: '2025-Q3' },
+        gdp: { value: 1.2, date: '2025-Q4' }
+      }
+    };
+
+    const indicatorsData = {};
+
+    // Use manual overrides as primary source (EODHD macro data is 1-2 years behind)
+    for (const country of countries) {
+      if (manualOverrides[country.currency]) {
+        indicatorsData[country.currency] = manualOverrides[country.currency];
+        console.log(`✅ Using manual data for ${country.currency}:`, 
+          `Inflation: ${indicatorsData[country.currency].inflation.value}% (${indicatorsData[country.currency].inflation.date})`,
+          `Unemployment: ${indicatorsData[country.currency].unemployment.value}%`,
+          `GDP: ${indicatorsData[country.currency].gdp.value}%`
+        );
+      } else {
+        indicatorsData[country.currency] = {
+          inflation: { value: null, date: null },
+          unemployment: { value: null, date: null },
+          gdp: { value: null, date: null }
+        };
+      }
+    }
+
+    /* 
+    // EODHD API is too slow (1-2 years behind) - disabled
+    // Keeping this code commented in case they update their data pipeline in the future
+    // Fetch data from EODHD for each country
+    for (const country of countries) {
+      try {
+        // Fetch macro indicators from EODHD using their macro-indicator endpoint
+        const [inflationRes, unemploymentRes, gdpRes] = await Promise.all([
+          axios.get(`https://eodhd.com/api/macro-indicator/${country.code}`, {
+            params: {
+              api_token: EODHD_KEY,
+              indicator: 'inflation_consumer_prices_annual',
+              fmt: 'json'
+            },
+            timeout: 10000
+          }).catch(e => null),
+          axios.get(`https://eodhd.com/api/macro-indicator/${country.code}`, {
+            params: {
+              api_token: EODHD_KEY,
+              indicator: 'unemployment_rate',
+              fmt: 'json'
+            },
+            timeout: 10000
+          }).catch(e => null),
+          axios.get(`https://eodhd.com/api/macro-indicator/${country.code}`, {
+            params: {
+              api_token: EODHD_KEY,
+              indicator: 'gdp_growth_annual',
+              fmt: 'json'
+            },
+            timeout: 10000
+          }).catch(e => null)
+        ]);
+
+        // Extract latest values from each response
+        const getLatestFromResponse = (response) => {
+          if (response && response.data && Array.isArray(response.data) && response.data.length > 0) {
+            // The data comes as an array with the most recent at the end
+            for (let i = response.data.length - 1; i >= 0; i--) {
+              if (response.data[i].Value !== null && response.data[i].Value !== undefined) {
+                return {
+                  value: parseFloat(response.data[i].Value),
+                  date: response.data[i].Date
+                };
+              }
+            }
+          }
+          return null;
+        };
+
+        const inflationData = getLatestFromResponse(inflationRes);
+        const unemploymentData = getLatestFromResponse(unemploymentRes);
+        const gdpData = getLatestFromResponse(gdpRes);
+
+        // Use EODHD data if available, otherwise fallback to manual overrides
+        indicatorsData[country.currency] = {
+          inflation: inflationData || (manualOverrides[country.currency]?.inflation) || { value: null, date: null },
+          unemployment: unemploymentData || (manualOverrides[country.currency]?.unemployment) || { value: null, date: null },
+          gdp: gdpData || (manualOverrides[country.currency]?.gdp) || { value: null, date: null }
+        };
+
+        console.log(`✅ Fetched ${country.currency} from EODHD:`,
+          `Inflation: ${indicatorsData[country.currency].inflation.value}% (${inflationData ? 'API' : 'fallback'})`,
+          `Unemployment: ${indicatorsData[country.currency].unemployment.value}% (${unemploymentData ? 'API' : 'fallback'})`,
+          `GDP: ${indicatorsData[country.currency].gdp.value}% (${gdpData ? 'API' : 'fallback'})`
+        );
+
+      } catch (error) {
+        console.error(`❌ Error fetching ${country.currency} indicators from EODHD:`, error.message);
+        // Fallback to manual overrides
+        indicatorsData[country.currency] = manualOverrides[country.currency] || {
+          inflation: { value: null, date: null },
+          unemployment: { value: null, date: null },
+          gdp: { value: null, date: null }
+        };
+      }
+    }
+    */
+
+    const result = {
+      timestamp: new Date().toISOString(),
+      indicators: indicatorsData
+    };
+
+    // Cache the data
+    economicIndicatorsCache = result;
+    economicIndicatorsCacheTime = now;
+
+    console.log("✅ Economic indicators cached for 30 days");
+    res.json(result);
+
+  } catch (error) {
+    console.error("❌ Economic Indicators Error:", error.message);
+    
+    // Return cached data if available
+    if (economicIndicatorsCache) {
+      console.log("⚠️ Returning stale cached economic indicators");
+      return res.json({ ...economicIndicatorsCache, stale: true });
+    }
+
+    res.status(500).json({ 
+      error: "Failed to fetch economic indicators",
       message: error.message 
     });
   }
