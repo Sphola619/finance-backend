@@ -30,6 +30,7 @@ const TWELVEDATA_KEY = process.env.TWELVEDATA_API_KEY;
 const FINNHUB_KEY = process.env.FINNHUB_API_KEY;
 const FMP_KEY = process.env.FMP_API_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const IRESS_JWT_TOKEN = process.env.IRESS_JWT_TOKEN;
 const PORT = process.env.PORT || 5000;
 
 /* ------------------------------------------------------
@@ -40,6 +41,7 @@ const GENERIC_TTL = 5 * 60 * 1000; // 5 minutes
 const HEATMAP_TTL = 15 * 60 * 1000; // 15 minutes
 const CALENDAR_TTL = 6 * 60 * 60 * 1000; // 6 hours
 const CORRELATION_TTL = 60 * 60 * 1000; // 1 hour
+const JSE_CACHE_TTL = 15 * 60 * 1000; // 15 minutes (matches iress update frequency)
 
 let moversCache = null;
 let moversCacheTimestamp = 0;
@@ -61,6 +63,8 @@ let newsCache = null;
 let newsCacheTime = 0;
 let correlationCache = {};
 let correlationCacheTime = 0;
+let jseCache = null;
+let jseCacheTime = 0;
 
 /* ------------------------------------------------------
    SYMBOLS
@@ -1093,95 +1097,6 @@ app.get("/api/economic-calendar", async (req, res) => {
 });
 
 /* ------------------------------------------------------
-   JSE STOCKS
------------------------------------------------------- */
-app.get("/api/jse-stocks", async (req, res) => {
-  try {
-    const JSE_SYMBOLS = {
-      "Naspers": "NPN.JO",
-      "Prosus": "PRX.JO",
-      "Anglo American": "AGL.JO",
-      "BHP Group": "BHP.JO",
-      "Standard Bank": "SBK.JO",
-      "FirstRand": "FSR.JO",
-      "MTN Group": "MTN.JO",
-      "Sasol": "SOL.JO",
-      "Shoprite": "SHP.JO",
-      "Capitec Bank": "CPI.JO",
-      "Sanlam": "SLM.JO",
-      "Nedbank": "NED.JO",
-      "Vodacom": "VOD.JO",
-      "Impala Platinum": "IMP.JO",
-      "Gold Fields": "GFI.JO"
-    };
-
-    const results = [];
-
-    for (const [name, symbol] of Object.entries(JSE_SYMBOLS)) {
-      try {
-        const url = `${YAHOO_CHART}/${symbol}?interval=1d&range=5d`;
-        const r = await http.get(url);
-        const data = r.data.chart?.result?.[0];
-
-        if (!data) {
-          console.warn(`⚠️ No data for ${symbol}`);
-          continue;
-        }
-
-        const closes = data.indicators.quote[0].close.filter(n => typeof n === "number");
-
-        if (closes.length < 2) {
-          console.warn(`⚠️ Insufficient data for ${symbol}`);
-          continue;
-        }
-
-        const currentPrice = closes.at(-1);
-        const previousPrice = closes.at(-2);
-
-        if (isNaN(currentPrice) || isNaN(previousPrice) || previousPrice === 0) {
-          console.warn(`⚠️ Invalid prices for ${symbol}`);
-          continue;
-        }
-
-        const pct = ((currentPrice - previousPrice) / previousPrice) * 100;
-
-        if (isNaN(pct)) {
-          console.warn(`⚠️ Calculated NaN for ${symbol}`);
-          continue;
-        }
-
-        results.push({
-          name,
-          symbol,
-          price: `R ${currentPrice.toFixed(2)}`,
-          change: `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`,
-          trend: pct >= 0 ? "positive" : "negative",
-          rawChange: pct,
-          currency: "ZAR"
-        });
-
-        console.log(`✅ JSE: ${name} - R${currentPrice.toFixed(2)} (${pct.toFixed(2)}%)`);
-
-      } catch (err) {
-        console.warn(`⚠️ JSE stock error ${symbol}:`, err.message);
-      }
-
-      await sleep(150);
-    }
-
-    results.sort((a, b) => Math.abs(b.rawChange) - Math.abs(a.rawChange));
-
-    console.log(`✅ Loaded ${results.length} JSE stocks`);
-    
-    res.json(results);
-
-  } catch (err) {
-    console.error("❌ /api/jse-stocks error:", err.message);
-    res.status(500).json({ error: "Failed to fetch JSE stocks" });
-  }
-});
-
-/* ------------------------------------------------------
    US STOCKS
 ------------------------------------------------------ */
 app.get("/api/us-stocks", async (req, res) => {
@@ -1373,6 +1288,81 @@ app.get("/api/test-eodhd-gold", async (req, res) => {
   } catch (err) {
     console.error("❌ Test error:", err.message);
     res.status(500).json({ error: err.message });
+  }
+});
+
+/* ------------------------------------------------------
+   JSE STOCKS FROM IRESS.CO.ZA
+------------------------------------------------------ */
+app.get("/api/jse-stocks", async (req, res) => {
+  try {
+    // Check cache first (15-minute cache matches iress update frequency)
+    const now = Date.now();
+    if (jseCache && (now - jseCacheTime < JSE_CACHE_TTL)) {
+      console.log("✅ Returning cached JSE data");
+      return res.json(jseCache);
+    }
+
+    if (!IRESS_JWT_TOKEN) {
+      return res.status(500).json({ 
+        error: "iress.co.za JWT token not configured" 
+      });
+    }
+
+    console.log("🔄 Fetching fresh JSE data from iress.co.za...");
+
+    // Fetch from iress.co.za API (token in URL)
+    const response = await axios.get(
+      `https://df.marketdata.feeds.iress.com/feed/2838/?token=${IRESS_JWT_TOKEN}`
+    );
+
+    // Extract and process the snapshot data
+    const jseData = response.data;
+    
+    if (!jseData || !jseData.Snapshot) {
+      throw new Error("Invalid response format from iress.co.za");
+    }
+
+    // Process and enrich the data
+    const processedData = {
+      timestamp: new Date().toISOString(),
+      count: jseData.Snapshot.length,
+      stocks: jseData.Snapshot.map(stock => ({
+        name: stock.SecurityName,
+        ticker: stock.Ticker,
+        exchange: stock.Exchange,
+        price: stock.LastPrice,
+        previousClose: stock.YesterdayClose,
+        open: stock.Open,
+        bid: stock.Bid,
+        ask: stock.Ask,
+        change: stock.LastPrice - stock.YesterdayClose,
+        changePercent: stock.YesterdayClose > 0 
+          ? ((stock.LastPrice - stock.YesterdayClose) / stock.YesterdayClose * 100).toFixed(2)
+          : 0
+      }))
+    };
+
+    // Cache the processed data
+    jseCache = processedData;
+    jseCacheTime = now;
+
+    console.log(`✅ JSE data cached: ${processedData.count} securities`);
+    res.json(processedData);
+
+  } catch (error) {
+    console.error("❌ JSE API Error:", error.message);
+    
+    // If we have cached data, return it even if stale
+    if (jseCache) {
+      console.log("⚠️ Returning stale cached JSE data due to API error");
+      return res.json({ ...jseCache, stale: true });
+    }
+
+    res.status(500).json({ 
+      error: "Failed to fetch JSE data",
+      message: error.message 
+    });
   }
 });
 
