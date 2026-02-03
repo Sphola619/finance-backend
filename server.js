@@ -33,6 +33,36 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const PORT = process.env.PORT || 5000;
 
 /* ------------------------------------------------------
+   CACHES
+------------------------------------------------------ */
+const MOVERS_CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+const GENERIC_TTL = 5 * 60 * 1000; // 5 minutes
+const HEATMAP_TTL = 15 * 60 * 1000; // 15 minutes
+const CALENDAR_TTL = 6 * 60 * 60 * 1000; // 6 hours
+const CORRELATION_TTL = 60 * 60 * 1000; // 1 hour
+
+let moversCache = null;
+let moversCacheTimestamp = 0;
+let indicesCache = null;
+let indicesCacheTime = 0;
+let forexCache = null;
+let forexCacheTime = 0;
+let heatmapCache = null;
+let heatmapCacheTime = 0;
+let cryptoCache = null;
+let cryptoCacheTime = 0;
+let commoditiesCache = null;
+let commoditiesCacheTime = 0;
+let cryptoHeatmapCache = null;
+let cryptoHeatmapCacheTime = 0;
+let calendarCache = null;
+let calendarCacheTime = 0;
+let newsCache = null;
+let newsCacheTime = 0;
+let correlationCache = {};
+let correlationCacheTime = 0;
+
+/* ------------------------------------------------------
    SYMBOLS
 ------------------------------------------------------ */
 
