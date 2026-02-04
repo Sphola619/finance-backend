@@ -367,7 +367,8 @@ app.get("/api/forex-strength", async (req, res) => {
 });
 
 /* ------------------------------------------------------
-   COMMODITIES - Yahoo Finance with Extended History ✅
+/* ------------------------------------------------------
+   COMMODITIES - EODHD with WTIUSD.FOREX ✅
 ------------------------------------------------------ */
 app.get("/api/commodities", async (req, res) => {
   try {
@@ -376,56 +377,53 @@ app.get("/api/commodities", async (req, res) => {
 
     const results = [];
 
-    for (const [name, symbol] of Object.entries(YAHOO_COMMODITY_SYMBOLS)) {
+    const EODHD_COMMODITIES = {
+      "Gold": "XAUUSD.FOREX",
+      "Silver": "XAGUSD.FOREX",
+      "Platinum": "XPTUSD.FOREX",
+      "Crude Oil": "WTIUSD.FOREX"  // ✅ Using WTIUSD.FOREX instead of CL.COMM
+    };
+
+    for (const [name, symbol] of Object.entries(EODHD_COMMODITIES)) {
       try {
-        // Fetch 10 days of data to ensure we have valid comparison points
-        const url = `${YAHOO_CHART}/${symbol}?interval=1d&range=10d`;
+        const url = `https://eodhd.com/api/eod/${symbol}?api_token=${EODHD_KEY}&period=d&fmt=json`;
         const r = await http.get(url);
-        const data = r.data.chart?.result?.[0];
+        const data = r.data;
 
-        if (!data) {
-          console.warn(`⚠️ No data for ${name} (${symbol})`);
+        if (!Array.isArray(data) || data.length < 2) {
+          console.warn(`⚠️ Insufficient data for ${name}`);
           continue;
         }
 
-        const closes = data.indicators.quote[0].close.filter(n => typeof n === "number");
+        const latest = data[data.length - 1];
+        const previous = data[data.length - 2];
 
-        if (closes.length < 2) {
-          console.warn(`⚠️ Insufficient data for ${name}: only ${closes.length} data points`);
-          continue;
-        }
-
-        const currentPrice = closes.at(-1);
-        const previousPrice = closes.at(-2);
+        const currentPrice = parseFloat(latest.close);
+        const previousPrice = parseFloat(previous.close);
 
         if (isNaN(currentPrice) || isNaN(previousPrice) || previousPrice === 0) {
-          console.warn(`⚠️ Invalid prices for ${name}: current=${currentPrice}, previous=${previousPrice}`);
+          console.warn(`⚠️ Invalid prices for ${name}`);
           continue;
         }
 
-        const pct = ((currentPrice - previousPrice) / previousPrice) * 100;
-
-        if (isNaN(pct)) {
-          console.warn(`⚠️ Calculated NaN for ${name}`);
-          continue;
-        }
+        const changePercent = ((currentPrice - previousPrice) / previousPrice) * 100;
 
         results.push({
           name,
           symbol: name,
-          change: `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`,
-          trend: pct >= 0 ? "positive" : "negative",
+          change: `${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%`,
+          trend: changePercent >= 0 ? "positive" : "negative",
           price: currentPrice.toFixed(2),
-          rawChange: pct
+          rawChange: changePercent
         });
 
-        console.log(`✅ ${name}: $${currentPrice.toFixed(2)} (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)`);
+        console.log(`✅ ${name}: $${currentPrice.toFixed(2)} (${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%)`);
 
       } catch (err) {
         console.warn(`⚠️ ${name} fetch error:`, err.message);
       }
 
-      await sleep(400);
+      await sleep(300);
     }
 
     results.sort((a, b) => Math.abs(b.rawChange) - Math.abs(a.rawChange));
@@ -434,7 +432,7 @@ app.get("/api/commodities", async (req, res) => {
     commoditiesCacheTime = Date.now();
     res.json(results);
 
-    console.log(`✅ Loaded ${results.length} commodities (Yahoo Finance)`);
+    console.log(`✅ Loaded ${results.length} commodities (EODHD)`);
 
   } catch (err) {
     console.error("❌ /api/commodities error:", err.message);
@@ -1400,7 +1398,7 @@ app.get("/api/economic-indicators", async (req, res) => {
     // Manual override for most current data (update monthly after releases)
     const manualOverrides = {
       USD: { 
-        inflation: { value: 2.9, date: '2026-01-13' }, // Latest US CPI (Jan 13, 2026 release)
+        inflation: { value: 2.7, date: '2026-01-13' }, // Latest US CPI (Jan 13, 2026 release)
         unemployment: { value: 4.0, date: '2026-01-31' },
         gdp: { value: 2.8, date: '2025-Q4' }
       },
