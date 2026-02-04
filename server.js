@@ -2,6 +2,7 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
+const WebSocket = require("ws");
 
 const app = express();
 
@@ -48,6 +49,32 @@ let moversCache = null;
 let moversCacheTimestamp = 0;
 let indicesCache = null;
 let indicesCacheTime = 0;
+
+// WebSocket cache for EODHD real-time indices
+const wsIndicesData = {
+  "GSPC.INDX": null,
+  "NDX.INDX": null,
+  "DJI.INDX": null
+};
+
+// WebSocket cache for EODHD real-time US stocks
+const wsStocksData = {
+  "AAPL.US": null,
+  "MSFT.US": null,
+  "AMZN.US": null,
+  "GOOGL.US": null,
+  "TSLA.US": null,
+  "NVDA.US": null,
+  "META.US": null,
+  "JPM.US": null,
+  "V.US": null,
+  "KO.US": null,
+  "JNJ.US": null,
+  "WMT.US": null,
+  "MA.US": null,
+  "PFE.US": null,
+  "NFLX.US": null
+};
 let forexCache = null;
 let forexCacheTime = 0;
 let heatmapCache = null;
@@ -92,10 +119,10 @@ const YAHOO_COMMODITY_SYMBOLS = {
 };
 
 const INDEX_SYMBOLS = {
-  "S&P 500": "^GSPC",
-  "NASDAQ 100": "^NDX",
-  "Dow Jones": "^DJI",
-  "JSE Top 40": "^J200.JO"
+  "S&P 500": "GSPC.INDX",
+  "NASDAQ 100": "NDX.INDX",
+  "Dow Jones": "DJI.INDX",
+  "JSE Top 40": "^J200.JO"  // Yahoo Finance
 };
 
 const YAHOO_FOREX_SYMBOLS = {
@@ -118,10 +145,10 @@ const YAHOO_HEATMAP_SYMBOLS = {
   "GBP/ZAR": "GBPZAR=X",
   "AUD/USD": "AUDUSD=X",
   "USD/CHF": "USDCHF=X",
-  Gold: "GC=F",        // ✅ Changed from ETF (GLD) to futures
-  Silver: "SI=F",      // ✅ Changed from ETF (SLV) to futures
-  Platinum: "PL=F",    // ✅ Changed from ETF (PPLT) to futures
-  "Crude Oil": "CL=F"  // ✅ Changed from ETF (USO) to futures
+  Gold: "GC=F",        //  Changed from ETF (GLD) to futures
+  Silver: "SI=F",      //  Changed from ETF (SLV) to futures
+  Platinum: "PL=F",    //  Changed from ETF (PPLT) to futures
+  "Crude Oil": "CL=F"  //  Changed from ETF (USO) to futures
 };
 
 // ✅ Correlation Matrix Assets
@@ -183,7 +210,7 @@ function calculateCorrelation(arr1, arr2) {
 }
 
 /* ------------------------------------------------------
-   NEWS
+   NEWS - General Financial Market News
 ------------------------------------------------------ */
 app.get("/api/news", async (req, res) => {
   try {
@@ -192,29 +219,51 @@ app.get("/api/news", async (req, res) => {
       return res.json(newsCache);
     }
 
-    console.log("📰 Fetching news from Finnhub...");
+    console.log("📰 Fetching news from EODHD...");
     
     const r = await http.get(
-      `https://finnhub.io/api/v1/news?category=general&token=${FINNHUB_KEY}`
+      `https://eodhd.com/api/news?api_token=${EODHD_KEY}&limit=50&offset=0&fmt=json`
     );
 
     if (!r.data || !Array.isArray(r.data)) {
-      console.error("❌ Invalid news response from Finnhub");
+      console.error("❌ Invalid news response from EODHD");
       return res.status(500).json({ error: "Failed to fetch news" });
     }
 
-    console.log(`✅ Loaded ${r.data.length} news articles`);
+    // Transform EODHD format to match Finnhub format for frontend compatibility
+    const transformedNews = r.data.map(article => {
+      // Extract publisher from URL if source not provided
+      let publisher = article.source || "EODHD";
+      if (!article.source && article.link) {
+        try {
+          const url = new URL(article.link);
+          publisher = url.hostname.replace('www.', '');
+        } catch (e) {
+          publisher = "EODHD";
+        }
+      }
+      
+      return {
+        headline: article.title,
+        summary: article.content || article.title,
+        source: publisher,
+        url: article.link,
+        datetime: new Date(article.date).getTime() / 1000 // Convert to Unix timestamp
+      };
+    });
 
-    newsCache = r.data;
+    console.log(`✅ Loaded ${transformedNews.length} news articles from EODHD`);
+
+    newsCache = transformedNews;
     newsCacheTime = Date.now();
 
-    res.json(r.data);
+    res.json(transformedNews);
   } catch (err) {
     console.error("❌ /api/news error:", err.message);
     
     if (err.response) {
-      console.error("📍 Finnhub Response status:", err.response.status);
-      console.error("📍 Finnhub Response data:", err.response.data);
+      console.error("📍 EODHD Response status:", err.response.status);
+      console.error("📍 EODHD Response data:", err.response.data);
     }
     
     res.status(500).json({ error: "Failed to fetch news" });
@@ -222,43 +271,157 @@ app.get("/api/news", async (req, res) => {
 });
 
 /* ------------------------------------------------------
-   INDICES
+   STOCK-SPECIFIC NEWS
+------------------------------------------------------ */
+let stockNewsCache = null;
+let stockNewsCacheTime = 0;
+
+app.get("/api/stock-news", async (req, res) => {
+  try {
+    if (stockNewsCache && Date.now() - stockNewsCacheTime < 5 * 60 * 1000) {
+      console.log("✅ Using cached stock news data");
+      return res.json(stockNewsCache);
+    }
+
+    console.log("📰 Fetching stock-specific news from EODHD...");
+    
+    // Fetch general financial news (includes stock-related news)
+    const r = await http.get(
+      `https://eodhd.com/api/news?api_token=${EODHD_KEY}&limit=50&offset=0&fmt=json`
+    );
+
+    if (!r.data || !Array.isArray(r.data)) {
+      console.error("❌ Invalid stock news response from EODHD");
+      return res.status(500).json({ error: "Failed to fetch stock news" });
+    }
+
+    // Transform EODHD format to match frontend format
+    const transformedNews = r.data.map(article => {
+      // Extract publisher from URL if source not provided
+      let publisher = article.source || "EODHD";
+      if (!article.source && article.link) {
+        try {
+          const url = new URL(article.link);
+          publisher = url.hostname.replace('www.', '');
+        } catch (e) {
+          publisher = "EODHD";
+        }
+      }
+      
+      return {
+        headline: article.title,
+        summary: article.content || article.title,
+        source: publisher,
+        url: article.link,
+        datetime: new Date(article.date).getTime() / 1000, // Convert to Unix timestamp
+        symbols: article.symbols || [] // Include related stock symbols
+      };
+    });
+
+    console.log(`✅ Loaded ${transformedNews.length} stock news articles from EODHD`);
+
+    stockNewsCache = transformedNews;
+    stockNewsCacheTime = Date.now();
+
+    res.json(transformedNews);
+  } catch (err) {
+    console.error("❌ /api/stock-news error:", err.message);
+    
+    if (err.response) {
+      console.error("📍 EODHD Response status:", err.response.status);
+      console.error("📍 EODHD Response data:", err.response.data);
+    }
+    
+    res.status(500).json({ error: "Failed to fetch stock news" });
+  }
+});
+
+/* ------------------------------------------------------
+   INDICES - EODHD for US indices, Yahoo for JSE
 ------------------------------------------------------ */
 app.get("/api/indices", async (req, res) => {
   try {
-    if (indicesCache && Date.now() - indicesCacheTime < GENERIC_TTL)
+    // Cache for 1 minute (REST API updates every 15-20 minutes anyway)
+    const INDICES_CACHE_TTL = 60 * 1000;
+    if (indicesCache && Date.now() - indicesCacheTime < INDICES_CACHE_TTL)
       return res.json(indicesCache);
 
     const results = [];
 
     for (const [name, symbol] of Object.entries(INDEX_SYMBOLS)) {
       try {
-        const r = await http.get(`${YAHOO_CHART}/${symbol}?interval=1d&range=5d`);
-        const data = r.data.chart?.result?.[0];
-        if (!data) continue;
+        // Yahoo Finance for JSE Top 40
+        if (name === "JSE Top 40") {
+          const r = await http.get(`${YAHOO_CHART}/${symbol}?interval=1d&range=5d`);
+          const data = r.data.chart?.result?.[0];
+          
+          if (!data || !data.meta || !data.indicators?.quote?.[0]) {
+            console.warn(`⚠️ No Yahoo data for ${name}`);
+            continue;
+          }
 
-        const closes = data.indicators.quote[0].close.filter(n => typeof n === "number");
-        if (closes.length < 2) continue;
+          const closes = data.indicators.quote[0].close.filter(c => c !== null);
+          if (closes.length < 2) {
+            console.warn(`⚠️ Insufficient data for ${name}`);
+            continue;
+          }
 
-        const pct = ((closes.at(-1) - closes.at(-2)) / closes.at(-2)) * 100;
+          const currentPrice = closes[closes.length - 1];
+          const previousClose = closes[closes.length - 2];
+          const changePercent = ((currentPrice - previousClose) / previousClose) * 100;
 
-        results.push({
-          name,
-          symbol,
-          change: `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`,
-          latest: closes.at(-1).toFixed(2),
-          rawChange: pct
-        });
+          results.push({
+            name,
+            symbol,
+            change: `${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%`,
+            latest: currentPrice.toFixed(2),
+            rawChange: changePercent
+          });
+
+          console.log(`✅ ${name} (Yahoo): ${currentPrice.toFixed(2)} (${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%)`);
+        } else {
+          // Use EODHD REST API for US indices
+          const url = `https://eodhd.com/api/real-time/${symbol}?api_token=${EODHD_KEY}&fmt=json`;
+          const r = await http.get(url);
+          const data = r.data;
+
+          if (!data || !data.close || !data.previousClose) {
+            console.warn(`⚠️ No EODHD data for ${name}`);
+            continue;
+          }
+
+          const currentPrice = parseFloat(data.close);
+          const previousClose = parseFloat(data.previousClose);
+          const changePercent = parseFloat(data.change_p);
+
+          if (isNaN(currentPrice) || isNaN(changePercent)) {
+            console.warn(`⚠️ Invalid data for ${name}`);
+            continue;
+          }
+
+          results.push({
+            name,
+            symbol,
+            change: `${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%`,
+            latest: currentPrice.toFixed(2),
+            rawChange: changePercent
+          });
+
+          console.log(`✅ ${name} (EODHD): ${currentPrice.toFixed(2)} (${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%)`);
+        }
+
       } catch (err) {
-        console.warn(`⚠️ Index error ${symbol}:`, err.message);
+        console.warn(`⚠️ Index error ${name}:`, err.message);
       }
 
-      await sleep(120);
+      await sleep(200);
     }
 
     indicesCache = results;
     indicesCacheTime = Date.now();
     res.json(results);
+
+    console.log(`✅ Loaded ${results.length} indices (EODHD + Yahoo)`);
 
   } catch (err) {
     console.error("❌ /api/indices error:", err.message);
@@ -368,45 +531,60 @@ app.get("/api/forex-strength", async (req, res) => {
 
 /* ------------------------------------------------------
 /* ------------------------------------------------------
-   COMMODITIES - EODHD with WTIUSD.FOREX ✅
+   COMMODITIES - Yahoo Only (Consistent Pricing) ✅
 ------------------------------------------------------ */
 app.get("/api/commodities", async (req, res) => {
   try {
-    if (commoditiesCache && Date.now() - commoditiesCacheTime < GENERIC_TTL)
+    // Cache for 5 minutes
+    const COMMODITIES_CACHE_TTL = 5 * 60 * 1000;
+    
+    if (commoditiesCache && Date.now() - commoditiesCacheTime < COMMODITIES_CACHE_TTL)
       return res.json(commoditiesCache);
 
     const results = [];
 
-    const EODHD_COMMODITIES = {
-      "Gold": "XAUUSD.FOREX",
-      "Silver": "XAGUSD.FOREX",
-      "Platinum": "XPTUSD.FOREX",
-      "Crude Oil": "WTIUSD.FOREX"  // ✅ Using WTIUSD.FOREX instead of CL.COMM
+    const COMMODITY_SYMBOLS = {
+      "Gold": "GC=F",
+      "Silver": "SI=F",
+      "Platinum": "PL=F",
+      "Crude Oil": "CL=F"
     };
 
-    for (const [name, symbol] of Object.entries(EODHD_COMMODITIES)) {
+    for (const [name, symbol] of Object.entries(COMMODITY_SYMBOLS)) {
       try {
-        const url = `https://eodhd.com/api/eod/${symbol}?api_token=${EODHD_KEY}&period=d&fmt=json`;
-        const r = await http.get(url);
-        const data = r.data;
+        const yahooUrl = `${YAHOO_CHART}/${symbol}?interval=1d&range=5d`;
+        const yahooResp = await http.get(yahooUrl);
+        const yahooData = yahooResp.data.chart?.result?.[0];
 
-        if (!Array.isArray(data) || data.length < 2) {
-          console.warn(`⚠️ Insufficient data for ${name}`);
+        if (!yahooData || !yahooData.indicators?.quote?.[0]?.close) {
+          console.warn(`⚠️ No Yahoo data for ${name}`);
           continue;
         }
 
-        const latest = data[data.length - 1];
-        const previous = data[data.length - 2];
+        const closes = yahooData.indicators.quote[0].close.filter(n => typeof n === "number");
 
-        const currentPrice = parseFloat(latest.close);
-        const previousPrice = parseFloat(previous.close);
+        if (closes.length < 2) {
+          console.warn(`⚠️ Insufficient data for ${name}: only ${closes.length} prices`);
+          continue;
+        }
 
-        if (isNaN(currentPrice) || isNaN(previousPrice) || previousPrice === 0) {
+        // Get current price (most recent) and yesterday's close (previous)
+        const currentPrice = closes.at(-1);
+        const yesterdayClose = closes.at(-2);
+
+        if (isNaN(currentPrice) || isNaN(yesterdayClose) || yesterdayClose === 0) {
           console.warn(`⚠️ Invalid prices for ${name}`);
           continue;
         }
 
-        const changePercent = ((currentPrice - previousPrice) / previousPrice) * 100;
+        // Calculate percentage change
+        const difference = currentPrice - yesterdayClose;
+        const changePercent = (difference / yesterdayClose) * 100;
+
+        if (isNaN(changePercent)) {
+          console.warn(`⚠️ Calculated NaN for ${name}`);
+          continue;
+        }
 
         results.push({
           name,
@@ -417,13 +595,13 @@ app.get("/api/commodities", async (req, res) => {
           rawChange: changePercent
         });
 
-        console.log(`✅ ${name}: $${currentPrice.toFixed(2)} (${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%)`);
+        console.log(`✅ ${name}: $${currentPrice.toFixed(2)} vs $${yesterdayClose.toFixed(2)} = ${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%`);
 
       } catch (err) {
         console.warn(`⚠️ ${name} fetch error:`, err.message);
       }
 
-      await sleep(300);
+      await sleep(200);
     }
 
     results.sort((a, b) => Math.abs(b.rawChange) - Math.abs(a.rawChange));
@@ -432,7 +610,7 @@ app.get("/api/commodities", async (req, res) => {
     commoditiesCacheTime = Date.now();
     res.json(results);
 
-    console.log(`✅ Loaded ${results.length} commodities (EODHD)`);
+    console.log(`✅ Loaded ${results.length} commodities (Yahoo, cached 5min)`);
 
   } catch (err) {
     console.error("❌ /api/commodities error:", err.message);
@@ -503,7 +681,7 @@ app.get("/api/crypto", async (req, res) => {
 });
 
 /* ------------------------------------------------------
-   CORRELATION MATRIX ✅ NEW FEATURE
+   CORRELATION MATRIX 
 ------------------------------------------------------ */
 app.get("/api/correlation-matrix", async (req, res) => {
   try {
@@ -1128,6 +1306,28 @@ app.get("/api/us-stocks", async (req, res) => {
 
     for (const [name, symbol] of Object.entries(US_SYMBOLS)) {
       try {
+        // Try WebSocket data first (real-time)
+        const wsData = wsStocksData[symbol];
+        
+        if (wsData && wsData.price && wsData.changePercent !== undefined) {
+          // WebSocket data is fresh (within 60 seconds)
+          if (Date.now() - wsData.timestamp < 60 * 1000) {
+            results.push({
+              name,
+              symbol,
+              price: `$${wsData.price.toFixed(2)}`,
+              change: `${wsData.changePercent >= 0 ? "+" : ""}${wsData.changePercent.toFixed(2)}%`,
+              trend: wsData.changePercent >= 0 ? "positive" : "negative",
+              rawChange: wsData.changePercent,
+              currency: "USD"
+            });
+
+            console.log(`✅ US ${name} (WebSocket): ${wsData.price.toFixed(2)} (${wsData.changePercent >= 0 ? "+" : ""}${wsData.changePercent.toFixed(2)}%)`);
+            continue;
+          }
+        }
+
+        // Fallback to REST API
         const r = await http.get(
           `https://eodhd.com/api/real-time/${symbol}?api_token=${EODHD_KEY}&fmt=json`
         );
@@ -1164,7 +1364,7 @@ app.get("/api/us-stocks", async (req, res) => {
           currency: "USD"
         });
 
-        console.log(`✅ US: ${name} - ${pct.toFixed(2)}%`);
+        console.log(`✅ US ${name}: ${currentPrice.toFixed(2)} (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)`);
 
       } catch (err) {
         console.warn(`⚠️ US stock error ${symbol}:`, err.message);
@@ -1654,4 +1854,91 @@ app.listen(PORT, () => {
   console.log(`📊 Correlation Matrix API: http://localhost:${PORT}/api/correlation-matrix?period=30`);
   console.log(`🧪 EODHD Test: http://localhost:${PORT}/api/test-eodhd-gold`);
   console.log(`💬 Marome Chat AI: http://localhost:${PORT}/api/chat`);
+  console.log(`📡 Initializing EODHD WebSocket...`);
+  initEODHDWebSocket();
 });
+
+/* ------------------------------------------------------
+   EODHD WEBSOCKET FOR REAL-TIME INDICES & STOCKS
+------------------------------------------------------ */
+function initEODHDWebSocket() {
+  const wsUrl = `wss://ws.eodhistoricaldata.com/ws/us?api_token=${EODHD_KEY}`;
+  let ws = null;
+  let reconnectInterval = 5000;
+  let pingInterval = null;
+
+  function connect() {
+    console.log("📡 Connecting to EODHD WebSocket...");
+    ws = new WebSocket(wsUrl);
+
+    ws.on("open", () => {
+      console.log("✅ EODHD WebSocket connected");
+      
+      // Subscribe to US indices and stocks
+      const subscribeMsg = {
+        action: "subscribe",
+        symbols: "GSPC.INDX,NDX.INDX,DJI.INDX,AAPL.US,MSFT.US,AMZN.US,GOOGL.US,TSLA.US,NVDA.US,META.US,JPM.US,V.US,KO.US,JNJ.US,WMT.US,MA.US,PFE.US,NFLX.US"
+      };
+      ws.send(JSON.stringify(subscribeMsg));
+      console.log("📊 Subscribed to: 3 indices + 15 US stocks");
+
+      // Send ping every 30 seconds to keep connection alive
+      pingInterval = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.ping();
+        }
+      }, 30000);
+    });
+
+    ws.on("message", (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        
+        // Log ALL incoming messages for debugging
+        console.log("📩 WebSocket message received:", JSON.stringify(msg));
+        
+        // Store real-time data for indices
+        if (msg.s && wsIndicesData.hasOwnProperty(msg.s)) {
+          wsIndicesData[msg.s] = {
+            symbol: msg.s,
+            price: msg.p,
+            change: msg.c,
+            changePercent: msg.cp,
+            timestamp: Date.now()
+          };
+          console.log(`📈 INDEX ${msg.s}: ${msg.p} (${msg.cp >= 0 ? "+" : ""}${msg.cp}%)`);
+        }
+        
+        // Store real-time data for US stocks
+        if (msg.s && wsStocksData.hasOwnProperty(msg.s)) {
+          wsStocksData[msg.s] = {
+            symbol: msg.s,
+            price: msg.p,
+            change: msg.c,
+            changePercent: msg.cp,
+            timestamp: Date.now()
+          };
+          console.log(`📈 STOCK ${msg.s}: ${msg.p} (${msg.cp >= 0 ? "+" : ""}${msg.cp}%)`);
+        }
+      } catch (err) {
+        console.error("❌ WebSocket message parse error:", err.message);
+      }
+    });
+
+    ws.on("error", (err) => {
+      console.error("❌ EODHD WebSocket error:", err.message);
+    });
+
+    ws.on("close", () => {
+      console.log("⚠️ EODHD WebSocket closed, reconnecting...");
+      clearInterval(pingInterval);
+      setTimeout(connect, reconnectInterval);
+    });
+
+    ws.on("pong", () => {
+      // Connection is alive
+    });
+  }
+
+  connect();
+}
