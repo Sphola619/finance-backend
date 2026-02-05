@@ -2112,20 +2112,15 @@ function initForexWebSocket() {
         const change = Number.isFinite(prevClose) ? (price - prevClose) : (parseFloat(msg.dd) || 0);
         const isZarCross = wsSymbol.endsWith("ZAR");
         const restPercent = forexRestChangePercent[wsSymbol];
-        const restClose = forexRestClose[wsSymbol];
         const changePercent = isZarCross && Number.isFinite(restPercent)
           ? restPercent
           : (Number.isFinite(prevClose) && prevClose !== 0
               ? (change / prevClose) * 100
               : (parseFloat(msg.dc) || 0));
-
-        const effectivePrice = isZarCross && Number.isFinite(restClose)
-          ? restClose
-          : price;
         
         const payload = {
           symbol: msg.s + ".FOREX", // Add .FOREX suffix to match REST API format
-          price: effectivePrice,
+          price: price,
           change: change,
           changePercent: changePercent,
           timestamp: Date.now()
@@ -2134,11 +2129,11 @@ function initForexWebSocket() {
         // Store real-time data for forex pairs
         if (wsForexData.hasOwnProperty(msg.s)) {
           wsForexData[msg.s] = payload;
-          console.log(`💱 FOREX ${msg.s}: ${effectivePrice.toFixed(4)} (${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%)`);
+          console.log(`💱 FOREX ${msg.s}: ${price.toFixed(4)} (${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%)`);
           broadcastForexUpdate({
             symbol: msg.s,
             pair: FOREX_SYMBOL_TO_PAIR[msg.s],
-            price: effectivePrice,
+            price: price,
             change: change,
             changePercent: changePercent,
             timestamp: Date.now()
