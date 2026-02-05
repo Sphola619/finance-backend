@@ -33,6 +33,7 @@ const FMP_KEY = process.env.FMP_API_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const IRESS_JWT_TOKEN = process.env.IRESS_JWT_TOKEN;
 const PORT = process.env.PORT || 5000;
+const WS_PORT = process.env.WS_PORT || 5001;
 
 /* ------------------------------------------------------
    CACHES
@@ -74,6 +75,18 @@ const wsStocksData = {
   "MA.US": null,
   "PFE.US": null,
   "NFLX.US": null
+};
+
+// WebSocket cache for EODHD real-time forex
+const wsForexData = {
+  "EURUSD": null,
+  "GBPUSD": null,
+  "USDJPY": null,
+  "USDZAR": null,
+  "EURZAR": null,
+  "GBPZAR": null,
+  "AUDUSD": null,
+  "USDCHF": null
 };
 let forexCache = null;
 let forexCacheTime = 0;
@@ -125,16 +138,21 @@ const INDEX_SYMBOLS = {
   "JSE Top 40": "^J200.JO"  // Yahoo Finance
 };
 
-const YAHOO_FOREX_SYMBOLS = {
-  "EUR/USD": "EURUSD=X",
-  "GBP/USD": "GBPUSD=X",
-  "USD/JPY": "USDJPY=X",
-  "USD/ZAR": "USDZAR=X",
-  "EUR/ZAR": "EURZAR=X",
-  "GBP/ZAR": "GBPZAR=X",
-  "AUD/USD": "AUDUSD=X",
-  "USD/CHF": "USDCHF=X"
+const EODHD_FOREX_SYMBOLS = {
+  "EUR/USD": "EURUSD.FOREX",
+  "GBP/USD": "GBPUSD.FOREX",
+  "USD/JPY": "USDJPY.FOREX",
+  "USD/ZAR": "USDZAR.FOREX",
+  "EUR/ZAR": "EURZAR.FOREX",
+  "GBP/ZAR": "GBPZAR.FOREX",
+  "AUD/USD": "AUDUSD.FOREX",
+  "USD/CHF": "USDCHF.FOREX"
 };
+
+const FOREX_SYMBOL_TO_PAIR = Object.entries(EODHD_FOREX_SYMBOLS).reduce((acc, [pair, symbol]) => {
+  acc[symbol.replace(".FOREX", "")] = pair;
+  return acc;
+}, {});
 
 const YAHOO_HEATMAP_SYMBOLS = {
   "EUR/USD": "EURUSD=X",
@@ -341,11 +359,7 @@ app.get("/api/stock-news", async (req, res) => {
 ------------------------------------------------------ */
 app.get("/api/indices", async (req, res) => {
   try {
-    // Cache for 1 minute (REST API updates every 15-20 minutes anyway)
-    const INDICES_CACHE_TTL = 60 * 1000;
-    if (indicesCache && Date.now() - indicesCacheTime < INDICES_CACHE_TTL)
-      return res.json(indicesCache);
-
+    // No caching - always return fresh WebSocket data for US indices
     const results = [];
 
     for (const [name, symbol] of Object.entries(INDEX_SYMBOLS)) {
@@ -417,8 +431,6 @@ app.get("/api/indices", async (req, res) => {
       await sleep(200);
     }
 
-    indicesCache = results;
-    indicesCacheTime = Date.now();
     res.json(results);
 
     console.log(`✅ Loaded ${results.length} indices (EODHD + Yahoo)`);
@@ -430,45 +442,76 @@ app.get("/api/indices", async (req, res) => {
 });
 
 /* ------------------------------------------------------
-   FOREX
+   FOREX - EODHD WebSocket + REST API fallback
 ------------------------------------------------------ */
 app.get("/api/forex", async (req, res) => {
   try {
-    if (forexCache && Date.now() - forexCacheTime < GENERIC_TTL)
-      return res.json(forexCache);
-
+    // No caching - always return fresh WebSocket data
     const results = [];
 
-    for (const [pair, symbol] of Object.entries(YAHOO_FOREX_SYMBOLS)) {
+    for (const [pair, symbol] of Object.entries(EODHD_FOREX_SYMBOLS)) {
       try {
-        const r = await http.get(`${YAHOO_CHART}/${symbol}?interval=1d&range=5d`);
-        const data = r.data.chart?.result?.[0];
-        if (!data) continue;
+        // Try WebSocket data first (real-time)
+        const wsSymbol = symbol.replace('.FOREX', ''); // Convert EURUSD.FOREX to EURUSD
+        const wsData = wsForexData[wsSymbol];
+        
+        if (wsData && wsData.price && wsData.changePercent !== undefined) {
+          // WebSocket data is fresh (within 60 seconds)
+          if (Date.now() - wsData.timestamp < 60 * 1000) {
+            results.push({
+              pair,
+              name: pair,
+              change: `${wsData.changePercent >= 0 ? "+" : ""}${wsData.changePercent.toFixed(2)}%`,
+              trend: wsData.changePercent >= 0 ? "positive" : "negative",
+              price: wsData.price,
+              rawChange: wsData.changePercent
+            });
 
-        const closes = data.indicators.quote[0].close.filter(n => typeof n === "number");
-        if (closes.length < 2) continue;
+            console.log(`✅ ${pair} (WebSocket): ${wsData.price.toFixed(4)} (${wsData.changePercent >= 0 ? "+" : ""}${wsData.changePercent.toFixed(2)}%)`);
+            continue;
+          }
+        }
 
-        const pct = ((closes.at(-1) - closes.at(-2)) / closes.at(-2)) * 100;
+        // Fallback to REST API
+        const url = `https://eodhd.com/api/real-time/${symbol}?api_token=${EODHD_KEY}&fmt=json`;
+        const r = await http.get(url);
+        const data = r.data;
+
+        if (!data || !data.close || !data.previousClose) {
+          console.warn(`⚠️ No EODHD data for ${pair}`);
+          continue;
+        }
+
+        const currentPrice = parseFloat(data.close);
+        const previousClose = parseFloat(data.previousClose);
+        const changePercent = parseFloat(data.change_p);
+
+        if (isNaN(currentPrice) || isNaN(changePercent)) {
+          console.warn(`⚠️ Invalid data for ${pair}`);
+          continue;
+        }
 
         results.push({
           pair,
           name: pair,
-          change: `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`,
-          trend: pct >= 0 ? "positive" : "negative",
-          price: closes.at(-1),
-          rawChange: pct
+          change: `${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%`,
+          trend: changePercent >= 0 ? "positive" : "negative",
+          price: currentPrice,
+          rawChange: changePercent
         });
 
+        console.log(`✅ ${pair} (EODHD): ${currentPrice.toFixed(4)} (${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%)`);
+
       } catch (err) {
-        console.warn(`⚠️ Yahoo FX error for ${symbol}:`, err.message);
+        console.warn(`⚠️ EODHD FX error for ${symbol}:`, err.message);
       }
 
       await sleep(100);
     }
 
-    forexCache = results;
-    forexCacheTime = Date.now();
     res.json(results);
+
+    console.log(`✅ Loaded ${results.length} forex pairs (WebSocket + EODHD)`);
 
   } catch (err) {
     console.error("❌ /api/forex error:", err.message);
@@ -1854,9 +1897,34 @@ app.listen(PORT, () => {
   console.log(`📊 Correlation Matrix API: http://localhost:${PORT}/api/correlation-matrix?period=30`);
   console.log(`🧪 EODHD Test: http://localhost:${PORT}/api/test-eodhd-gold`);
   console.log(`💬 Marome Chat AI: http://localhost:${PORT}/api/chat`);
-  console.log(`📡 Initializing EODHD WebSocket...`);
+  console.log(`📡 Initializing EODHD WebSockets...`);
   initEODHDWebSocket();
+  initForexWebSocket();
 });
+
+/* ------------------------------------------------------
+   FRONTEND WEBSOCKET SERVER (PUSH UPDATES)
+------------------------------------------------------ */
+const wsServer = new WebSocket.Server({ port: WS_PORT });
+
+wsServer.on("connection", (socket) => {
+  console.log("🔌 Frontend WebSocket client connected");
+
+  socket.on("close", () => {
+    console.log("🔌 Frontend WebSocket client disconnected");
+  });
+});
+
+console.log(`🔌 Frontend WebSocket server running on ws://localhost:${WS_PORT}`);
+
+function broadcastForexUpdate(payload) {
+  const message = JSON.stringify({ type: "forex", ...payload });
+  wsServer.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  });
+}
 
 /* ------------------------------------------------------
    EODHD WEBSOCKET FOR REAL-TIME US INDICES & STOCKS
@@ -1927,6 +1995,94 @@ function initEODHDWebSocket() {
 
     ws.on("close", () => {
       console.log("⚠️ EODHD WebSocket closed, reconnecting...");
+      clearInterval(pingInterval);
+      setTimeout(connect, reconnectInterval);
+    });
+
+    ws.on("pong", () => {
+      // Connection is alive
+    });
+  }
+
+  connect();
+}
+
+/* ------------------------------------------------------
+   FOREX WEBSOCKET FOR REAL-TIME CURRENCY PAIRS
+------------------------------------------------------ */
+function initForexWebSocket() {
+  const wsUrl = `wss://ws.eodhistoricaldata.com/ws/forex?api_token=${EODHD_KEY}`;
+  let ws = null;
+  let reconnectInterval = 5000;
+  let pingInterval = null;
+
+  function connect() {
+    console.log("📡 Connecting to EODHD Forex WebSocket...");
+    ws = new WebSocket(wsUrl);
+
+    ws.on("open", () => {
+      console.log("✅ EODHD Forex WebSocket connected");
+      
+      // Subscribe to 8 forex pairs (WebSocket uses plain format without .FOREX suffix)
+      const subscribeMsg = {
+        action: "subscribe",
+        symbols: "EURUSD,GBPUSD,USDJPY,USDZAR,EURZAR,GBPZAR,AUDUSD,USDCHF"
+      };
+      ws.send(JSON.stringify(subscribeMsg));
+      console.log("💱 Subscribed to: 8 forex pairs");
+
+      // Send ping every 30 seconds to keep connection alive
+      pingInterval = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.ping();
+        }
+      }, 30000);
+    });
+
+    ws.on("message", (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        
+        // Forex uses different fields: a=ask, b=bid, dc=change%, dd=change
+        if (!msg.s || (msg.a == null && msg.b == null)) return;
+        
+        // Use mid price (average of bid and ask)
+        const price = msg.a && msg.b ? (msg.a + msg.b) / 2 : (msg.a || msg.b);
+        const changePercent = parseFloat(msg.dc) || 0;
+        const change = parseFloat(msg.dd) || 0;
+        
+        const payload = {
+          symbol: msg.s + ".FOREX", // Add .FOREX suffix to match REST API format
+          price: price,
+          change: change,
+          changePercent: changePercent,
+          timestamp: Date.now()
+        };
+        
+        // Store real-time data for forex pairs
+        if (wsForexData.hasOwnProperty(msg.s)) {
+          wsForexData[msg.s] = payload;
+          console.log(`💱 FOREX ${msg.s}: ${price.toFixed(4)} (${changePercent >= 0 ? "+" : ""}${changePercent}%)`);
+          broadcastForexUpdate({
+            symbol: msg.s,
+            pair: FOREX_SYMBOL_TO_PAIR[msg.s],
+            price: price,
+            change: change,
+            changePercent: changePercent,
+            timestamp: Date.now()
+          });
+        }
+      } catch (err) {
+        console.error("❌ Forex WebSocket message parse error:", err.message);
+      }
+    });
+
+    ws.on("error", (err) => {
+      console.error("❌ EODHD Forex WebSocket error:", err.message);
+    });
+
+    ws.on("close", () => {
+      console.log("⚠️ EODHD Forex WebSocket closed, reconnecting...");
       clearInterval(pingInterval);
       setTimeout(connect, reconnectInterval);
     });
