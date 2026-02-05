@@ -1,5 +1,6 @@
 require("dotenv").config();
 const express = require("express");
+const httpServer = require("http");
 const cors = require("cors");
 const axios = require("axios");
 const WebSocket = require("ws");
@@ -33,7 +34,6 @@ const FMP_KEY = process.env.FMP_API_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const IRESS_JWT_TOKEN = process.env.IRESS_JWT_TOKEN;
 const PORT = process.env.PORT || 5000;
-const WS_PORT = process.env.WS_PORT || 5001;
 
 /* ------------------------------------------------------
    CACHES
@@ -1927,7 +1927,9 @@ When users ask where to find specific data or features, guide them to the approp
 /* ------------------------------------------------------
    START SERVER
 ------------------------------------------------------ */
-app.listen(PORT, () => {
+const server = httpServer.createServer(app);
+
+server.listen(PORT, () => {
   console.log(`🚀 Marome Backend running on port ${PORT}`);
   console.log(`📊 Correlation Matrix API: http://localhost:${PORT}/api/correlation-matrix?period=30`);
   console.log(`🧪 EODHD Test: http://localhost:${PORT}/api/test-eodhd-gold`);
@@ -1940,7 +1942,7 @@ app.listen(PORT, () => {
 /* ------------------------------------------------------
    FRONTEND WEBSOCKET SERVER (PUSH UPDATES)
 ------------------------------------------------------ */
-const wsServer = new WebSocket.Server({ port: WS_PORT });
+const wsServer = new WebSocket.Server({ server });
 
 wsServer.on("connection", (socket) => {
   console.log("🔌 Frontend WebSocket client connected");
@@ -1950,7 +1952,7 @@ wsServer.on("connection", (socket) => {
   });
 });
 
-console.log(`🔌 Frontend WebSocket server running on ws://localhost:${WS_PORT}`);
+console.log(`🔌 Frontend WebSocket server running on ws://localhost:${PORT}`);
 
 function broadcastForexUpdate(payload) {
   const message = JSON.stringify({ type: "forex", ...payload });
