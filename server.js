@@ -1859,7 +1859,7 @@ app.listen(PORT, () => {
 });
 
 /* ------------------------------------------------------
-   EODHD WEBSOCKET FOR REAL-TIME INDICES & STOCKS
+   EODHD WEBSOCKET FOR REAL-TIME US INDICES & STOCKS
 ------------------------------------------------------ */
 function initEODHDWebSocket() {
   const wsUrl = `wss://ws.eodhistoricaldata.com/ws/us?api_token=${EODHD_KEY}`;
@@ -1894,30 +1894,26 @@ function initEODHDWebSocket() {
       try {
         const msg = JSON.parse(data.toString());
         
-        // Log ALL incoming messages for debugging
-        console.log("📩 WebSocket message received:", JSON.stringify(msg));
+        // Ignore non-price messages (auth confirmations, heartbeats, etc.)
+        if (!msg.s || msg.p == null) return;
+        
+        const payload = {
+          symbol: msg.s,
+          price: msg.p,
+          change: msg.c,
+          changePercent: msg.cp,
+          timestamp: Date.now()
+        };
         
         // Store real-time data for indices
-        if (msg.s && wsIndicesData.hasOwnProperty(msg.s)) {
-          wsIndicesData[msg.s] = {
-            symbol: msg.s,
-            price: msg.p,
-            change: msg.c,
-            changePercent: msg.cp,
-            timestamp: Date.now()
-          };
+        if (wsIndicesData.hasOwnProperty(msg.s)) {
+          wsIndicesData[msg.s] = payload;
           console.log(`📈 INDEX ${msg.s}: ${msg.p} (${msg.cp >= 0 ? "+" : ""}${msg.cp}%)`);
         }
         
         // Store real-time data for US stocks
-        if (msg.s && wsStocksData.hasOwnProperty(msg.s)) {
-          wsStocksData[msg.s] = {
-            symbol: msg.s,
-            price: msg.p,
-            change: msg.c,
-            changePercent: msg.cp,
-            timestamp: Date.now()
-          };
+        if (wsStocksData.hasOwnProperty(msg.s)) {
+          wsStocksData[msg.s] = payload;
           console.log(`📈 STOCK ${msg.s}: ${msg.p} (${msg.cp >= 0 ? "+" : ""}${msg.cp}%)`);
         }
       } catch (err) {
