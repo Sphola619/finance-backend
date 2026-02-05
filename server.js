@@ -88,6 +88,9 @@ const wsForexData = {
   "AUDUSD": null,
   "USDCHF": null
 };
+const forexPrevClose = {};
+const forexRestChangePercent = {};
+const forexRestClose = {};
 let forexCache = null;
 let forexCacheTime = 0;
 let heatmapCache = null;
@@ -153,6 +156,32 @@ const FOREX_SYMBOL_TO_PAIR = Object.entries(EODHD_FOREX_SYMBOLS).reduce((acc, [p
   acc[symbol.replace(".FOREX", "")] = pair;
   return acc;
 }, {});
+
+async function refreshForexPrevClose() {
+  for (const symbol of Object.values(EODHD_FOREX_SYMBOLS)) {
+    try {
+      const wsSymbol = symbol.replace(".FOREX", "");
+      const url = `https://eodhd.com/api/real-time/${symbol}?api_token=${EODHD_KEY}&fmt=json`;
+      const r = await http.get(url);
+      const previousClose = parseFloat(r.data?.previousClose);
+      const changePercent = parseFloat(r.data?.change_p);
+      const close = parseFloat(r.data?.close);
+      if (!isNaN(previousClose)) {
+        forexPrevClose[wsSymbol] = previousClose;
+      }
+      if (!isNaN(changePercent)) {
+        forexRestChangePercent[wsSymbol] = changePercent;
+      }
+      if (!isNaN(close)) {
+        forexRestClose[wsSymbol] = close;
+      }
+    } catch (err) {
+      console.warn(`⚠️ Prev close fetch error for ${symbol}:`, err.message);
+    }
+
+    await sleep(100);
+  }
+}
 
 const YAHOO_HEATMAP_SYMBOLS = {
   "EUR/USD": "EURUSD=X",
@@ -489,6 +518,12 @@ app.get("/api/forex", async (req, res) => {
         if (isNaN(currentPrice) || isNaN(changePercent)) {
           console.warn(`⚠️ Invalid data for ${pair}`);
           continue;
+        }
+
+        // Store previous close for WebSocket accuracy
+        const wsSymbolRest = symbol.replace(".FOREX", "");
+        if (!isNaN(previousClose)) {
+          forexPrevClose[wsSymbolRest] = previousClose;
         }
 
         results.push({
@@ -1926,6 +1961,15 @@ function broadcastForexUpdate(payload) {
   });
 }
 
+function broadcastUSStockUpdate(payload) {
+  const message = JSON.stringify({ type: "us-stock", ...payload });
+  wsServer.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  });
+}
+
 /* ------------------------------------------------------
    EODHD WEBSOCKET FOR REAL-TIME US INDICES & STOCKS
 ------------------------------------------------------ */
@@ -1983,6 +2027,12 @@ function initEODHDWebSocket() {
         if (wsStocksData.hasOwnProperty(msg.s)) {
           wsStocksData[msg.s] = payload;
           console.log(`📈 STOCK ${msg.s}: ${msg.p} (${msg.cp >= 0 ? "+" : ""}${msg.cp}%)`);
+          broadcastUSStockUpdate({
+            symbol: msg.s,
+            price: msg.p,
+            changePercent: msg.cp,
+            timestamp: Date.now()
+          });
         }
       } catch (err) {
         console.error("❌ WebSocket message parse error:", err.message);
@@ -2015,6 +2065,7 @@ function initForexWebSocket() {
   let ws = null;
   let reconnectInterval = 5000;
   let pingInterval = null;
+  let prevCloseInterval = null;
 
   function connect() {
     console.log("📡 Connecting to EODHD Forex WebSocket...");
@@ -2030,6 +2081,12 @@ function initForexWebSocket() {
       };
       ws.send(JSON.stringify(subscribeMsg));
       console.log("💱 Subscribed to: 8 forex pairs");
+
+      // Prime previousClose values and refresh periodically
+      refreshForexPrevClose();
+      prevCloseInterval = setInterval(() => {
+        refreshForexPrevClose();
+      }, 5 * 60 * 1000);
 
       // Send ping every 30 seconds to keep connection alive
       pingInterval = setInterval(() => {
@@ -2048,12 +2105,25 @@ function initForexWebSocket() {
         
         // Use mid price (average of bid and ask)
         const price = msg.a && msg.b ? (msg.a + msg.b) / 2 : (msg.a || msg.b);
-        const changePercent = parseFloat(msg.dc) || 0;
-        const change = parseFloat(msg.dd) || 0;
+        const wsSymbol = msg.s;
+        const prevClose = forexPrevClose[wsSymbol];
+        const change = Number.isFinite(prevClose) ? (price - prevClose) : (parseFloat(msg.dd) || 0);
+        const isZarCross = wsSymbol.endsWith("ZAR");
+        const restPercent = forexRestChangePercent[wsSymbol];
+        const restClose = forexRestClose[wsSymbol];
+        const changePercent = isZarCross && Number.isFinite(restPercent)
+          ? restPercent
+          : (Number.isFinite(prevClose) && prevClose !== 0
+              ? (change / prevClose) * 100
+              : (parseFloat(msg.dc) || 0));
+
+        const effectivePrice = isZarCross && Number.isFinite(restClose)
+          ? restClose
+          : price;
         
         const payload = {
           symbol: msg.s + ".FOREX", // Add .FOREX suffix to match REST API format
-          price: price,
+          price: effectivePrice,
           change: change,
           changePercent: changePercent,
           timestamp: Date.now()
@@ -2062,11 +2132,11 @@ function initForexWebSocket() {
         // Store real-time data for forex pairs
         if (wsForexData.hasOwnProperty(msg.s)) {
           wsForexData[msg.s] = payload;
-          console.log(`💱 FOREX ${msg.s}: ${price.toFixed(4)} (${changePercent >= 0 ? "+" : ""}${changePercent}%)`);
+          console.log(`💱 FOREX ${msg.s}: ${effectivePrice.toFixed(4)} (${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%)`);
           broadcastForexUpdate({
             symbol: msg.s,
             pair: FOREX_SYMBOL_TO_PAIR[msg.s],
-            price: price,
+            price: effectivePrice,
             change: change,
             changePercent: changePercent,
             timestamp: Date.now()
@@ -2084,6 +2154,7 @@ function initForexWebSocket() {
     ws.on("close", () => {
       console.log("⚠️ EODHD Forex WebSocket closed, reconnecting...");
       clearInterval(pingInterval);
+      clearInterval(prevCloseInterval);
       setTimeout(connect, reconnectInterval);
     });
 
