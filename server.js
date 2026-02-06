@@ -5,7 +5,29 @@ const cors = require("cors");
 const axios = require("axios");
 const WebSocket = require("ws");
 
+// WebSocket cache for EODHD real-time commodities (spot metals)
+const wsCommodityData = {
+  XAUUSD: null,
+  XAGUSD: null,
+  XPTUSD: null
+};
+
+// Flag to indicate if WS is active for commodities
+let commoditiesWsActive = false;
+
+// Broadcast commodity update to all WS clients (top-level, not inside any function)
+function broadcastCommodityUpdate(payload) {
+  const message = JSON.stringify({ type: "commodity", ...payload });
+  wsServer.clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  });
+}
+
 const app = express();
+
+
 
 /* ------------------------------------------------------
    CORS CONFIGURATION FOR VERCEL
@@ -86,8 +108,12 @@ const wsForexData = {
   "EURZAR": null,
   "GBPZAR": null,
   "AUDUSD": null,
-  "USDCHF": null
+  "USDCHF": null,
+  "XAUUSD": null, // Gold spot
+  "XAGUSD": null, // Silver spot
+  "XPTUSD": null  // Platinum spot
 };
+
 const forexPrevClose = {};
 const forexRestChangePercent = {};
 const forexRestClose = {};
@@ -124,7 +150,10 @@ const FOREX_PAIRS = [
   "EUR/ZAR",
   "GBP/ZAR",
   "AUD/USD",
-  "USD/CHF"
+  "USD/CHF",
+  "XAU/USD", // Gold spot
+  "XAG/USD", // Silver spot
+  "XPT/USD"  // Platinum spot
 ];
 
 const YAHOO_COMMODITY_SYMBOLS = {
@@ -149,7 +178,10 @@ const EODHD_FOREX_SYMBOLS = {
   "EUR/ZAR": "EURZAR.FOREX",
   "GBP/ZAR": "GBPZAR.FOREX",
   "AUD/USD": "AUDUSD.FOREX",
-  "USD/CHF": "USDCHF.FOREX"
+  "USD/CHF": "USDCHF.FOREX",
+  "XAU/USD": "XAUUSD.FOREX", // Gold spot
+  "XAG/USD": "XAGUSD.FOREX", // Silver spot
+  "XPT/USD": "XPTUSD.FOREX"  // Platinum spot
 };
 
 const FOREX_SYMBOL_TO_PAIR = Object.entries(EODHD_FOREX_SYMBOLS).reduce((acc, [pair, symbol]) => {
@@ -619,76 +651,76 @@ app.get("/api/commodities", async (req, res) => {
     if (commoditiesCache && Date.now() - commoditiesCacheTime < COMMODITIES_CACHE_TTL)
       return res.json(commoditiesCache);
 
+
     const results = [];
+    // Use EODHD symbols for live commodities
+    const EODHD_COMMODITIES = [
+      { name: "Gold", symbol: "XAUUSD" },
+      { name: "Silver", symbol: "XAGUSD" },
+      { name: "Platinum", symbol: "XPTUSD" },
+      { name: "Crude Oil", symbol: "CL=F" } // fallback to Yahoo for oil
+    ];
 
-    const COMMODITY_SYMBOLS = {
-      "Gold": "GC=F",
-      "Silver": "SI=F",
-      "Platinum": "PL=F",
-      "Crude Oil": "CL=F"
-    };
-
-    for (const [name, symbol] of Object.entries(COMMODITY_SYMBOLS)) {
+    for (const commodity of EODHD_COMMODITIES) {
       try {
-        const yahooUrl = `${YAHOO_CHART}/${symbol}?interval=1d&range=5d`;
-        const yahooResp = await http.get(yahooUrl);
-        const yahooData = yahooResp.data.chart?.result?.[0];
-
-        if (!yahooData || !yahooData.indicators?.quote?.[0]?.close) {
-          console.warn(`⚠️ No Yahoo data for ${name}`);
-          continue;
+        let currentPrice, yesterdayClose, changePercent;
+        if (["XAUUSD.FOREX", "XAGUSD.FOREX", "XPTUSD.FOREX"].includes(commodity.symbol)) {
+          // Fetch from EODHD REST API
+          const eodhdUrl = `https://eodhd.com/api/real-time/${commodity.symbol}?api_token=${EODHD_KEY}&fmt=json`;
+          const r = await axios.get(eodhdUrl);
+          const data = r.data;
+          currentPrice = parseFloat(data.close);
+          yesterdayClose = parseFloat(data.previousClose);
+          if (isNaN(currentPrice) || isNaN(yesterdayClose) || yesterdayClose === 0) {
+            console.warn(`⚠️ Invalid EODHD prices for ${commodity.name}`);
+            continue;
+          }
+          changePercent = ((currentPrice - yesterdayClose) / yesterdayClose) * 100;
+          // Optionally, label gold as spot
+          if (commodity.symbol === "XAUUSD.FOREX") {
+            commodity.name = "Gold (Spot – OTC)";
+          }
+        } else {
+          // Fallback to Yahoo for oil
+          const yahooUrl = `${YAHOO_CHART}/${commodity.symbol}?interval=1d&range=5d`;
+          const yahooResp = await http.get(yahooUrl);
+          const yahooData = yahooResp.data.chart?.result?.[0];
+          if (!yahooData || !yahooData.indicators?.quote?.[0]?.close) {
+            console.warn(`⚠️ No Yahoo data for ${commodity.name}`);
+            continue;
+          }
+          const closes = yahooData.indicators.quote[0].close.filter(n => typeof n === "number");
+          if (closes.length < 2) {
+            console.warn(`⚠️ Insufficient data for ${commodity.name}: only ${closes.length} prices`);
+            continue;
+          }
+          currentPrice = closes.at(-1);
+          yesterdayClose = closes.at(-2);
+          if (isNaN(currentPrice) || isNaN(yesterdayClose) || yesterdayClose === 0) {
+            console.warn(`⚠️ Invalid Yahoo prices for ${commodity.name}`);
+            continue;
+          }
+          changePercent = ((currentPrice - yesterdayClose) / yesterdayClose) * 100;
         }
-
-        const closes = yahooData.indicators.quote[0].close.filter(n => typeof n === "number");
-
-        if (closes.length < 2) {
-          console.warn(`⚠️ Insufficient data for ${name}: only ${closes.length} prices`);
-          continue;
-        }
-
-        // Get current price (most recent) and yesterday's close (previous)
-        const currentPrice = closes.at(-1);
-        const yesterdayClose = closes.at(-2);
-
-        if (isNaN(currentPrice) || isNaN(yesterdayClose) || yesterdayClose === 0) {
-          console.warn(`⚠️ Invalid prices for ${name}`);
-          continue;
-        }
-
-        // Calculate percentage change
-        const difference = currentPrice - yesterdayClose;
-        const changePercent = (difference / yesterdayClose) * 100;
-
-        if (isNaN(changePercent)) {
-          console.warn(`⚠️ Calculated NaN for ${name}`);
-          continue;
-        }
-
         results.push({
-          name,
-          symbol: name,
+          name: commodity.name,
+          symbol: commodity.symbol,
           change: `${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%`,
           trend: changePercent >= 0 ? "positive" : "negative",
           price: currentPrice.toFixed(2),
           rawChange: changePercent
         });
-
-        console.log(`✅ ${name}: $${currentPrice.toFixed(2)} vs $${yesterdayClose.toFixed(2)} = ${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%`);
-
+        console.log(`✅ ${commodity.name}: $${currentPrice.toFixed(2)} vs $${yesterdayClose.toFixed(2)} = ${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%`);
       } catch (err) {
-        console.warn(`⚠️ ${name} fetch error:`, err.message);
+        console.warn(`⚠️ ${commodity.name} fetch error:`, err.message);
       }
-
       await sleep(200);
     }
-
     results.sort((a, b) => Math.abs(b.rawChange) - Math.abs(a.rawChange));
-
     commoditiesCache = results;
     commoditiesCacheTime = Date.now();
     res.json(results);
-
-    console.log(`✅ Loaded ${results.length} commodities (Yahoo, cached 5min)`);
+    console.log(`✅ Loaded ${results.length} commodities (EODHD+Yahoo, cached 5min)`);
 
   } catch (err) {
     console.error("❌ /api/commodities error:", err.message);
@@ -2152,13 +2184,14 @@ function initForexWebSocket() {
     ws.on("open", () => {
       console.log("✅ EODHD Forex WebSocket connected");
       
-      // Subscribe to 8 forex pairs (WebSocket uses plain format without .FOREX suffix)
+      // Subscribe to 8 forex pairs + 3 metals (WebSocket uses plain format without .FOREX suffix)
       const subscribeMsg = {
         action: "subscribe",
-        symbols: "EURUSD,GBPUSD,USDJPY,USDZAR,EURZAR,GBPZAR,AUDUSD,USDCHF"
+        symbols: "EURUSD,GBPUSD,USDJPY,USDZAR,EURZAR,GBPZAR,AUDUSD,USDCHF,XAUUSD,XAGUSD,XPTUSD"
       };
       ws.send(JSON.stringify(subscribeMsg));
-      console.log("💱 Subscribed to: 8 forex pairs");
+      console.log("💱 Subscribed to: 8 forex pairs + 3 metals");
+
 
       // Prime previousClose values and refresh periodically
       refreshForexPrevClose();
@@ -2193,6 +2226,33 @@ function initForexWebSocket() {
           : (Number.isFinite(prevClose) && prevClose !== 0
               ? (change / prevClose) * 100
               : (parseFloat(msg.dc) || 0));
+
+        // 🔥 Handle spot metals (XAUUSD, XAGUSD, XPTUSD)
+        if (["XAUUSD", "XAGUSD", "XPTUSD"].includes(msg.s)) {
+          const payload = {
+            symbol: `${msg.s}.FOREX`, // normalize with REST format
+            price,
+            change,
+            changePercent,
+            timestamp: Date.now()
+          };
+
+          wsCommodityData[msg.s] = payload;
+          commoditiesWsActive = true;
+
+          broadcastCommodityUpdate({
+            symbol: payload.symbol,
+            price: payload.price,
+            changePercent: payload.changePercent,
+            timestamp: payload.timestamp
+          });
+
+          console.log(
+            `🥇 COMMODITY ${msg.s}: ${price.toFixed(2)} (${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%)`
+          );
+
+          return; // ⛔ stop forex logic from touching metals
+        }
         
         const payload = {
           symbol: msg.s + ".FOREX", // Add .FOREX suffix to match REST API format
