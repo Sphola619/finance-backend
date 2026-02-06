@@ -1543,6 +1543,69 @@ app.get("/api/sa-markets", async (req, res) => {
   }
 });
 
+// ------------------------------------------------------
+// SA MARKET NEWS - Filtered from EODHD
+// ------------------------------------------------------
+app.get("/api/sa-news", async (req, res) => {
+  try {
+    // Use cached news if available
+    if (newsCache && Date.now() - newsCacheTime < 5 * 60 * 1000) {
+      const saNews = newsCache.filter(article => isSouthAfricanNews(article));
+      return res.json(saNews);
+    }
+
+    // Fetch fresh news from EODHD
+    const r = await http.get(
+      `https://eodhd.com/api/news?api_token=${EODHD_KEY}&limit=50&offset=0&fmt=json`
+    );
+    if (!r.data || !Array.isArray(r.data)) {
+      return res.status(500).json({ error: "Failed to fetch news" });
+    }
+
+    // Transform and filter for SA news
+    const transformedNews = r.data.map(article => {
+      let publisher = article.source || "EODHD";
+      if (!article.source && article.link) {
+        try {
+          const url = new URL(article.link);
+          publisher = url.hostname.replace('www.', '');
+        } catch (e) {
+          publisher = "EODHD";
+        }
+      }
+      return {
+        headline: article.title,
+        summary: article.content || article.title,
+        source: publisher,
+        url: article.link,
+        datetime: new Date(article.date).getTime() / 1000,
+        symbols: article.symbols || []
+      };
+    });
+
+    // Save to cache
+    newsCache = transformedNews;
+    newsCacheTime = Date.now();
+
+    // Filter for South African news
+    const saNews = transformedNews.filter(article => isSouthAfricanNews(article));
+    res.json(saNews);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch SA news" });
+  }
+});
+
+function isSouthAfricanNews(article) {
+  // Keywords and JSE symbol filter
+  const keywords = [
+    'south africa', 'jse', 'rand', 'johannesburg', 'sarb', 'eskom', 'naspers', 'capitec', 'absa', 'standard bank', 'old mutual', 'sanlam', 'shoprite', 'woolworths', 'pick n pay', 'anglo', 'sibanye', 'impala', 'mtbps', 'minister of finance', 'treasury', 'pravin gordhan', 'tito mboweni', 'eoh', 'dis-chem', 'astral', 'remgro', 'psg', 'sun international', 'mtn', 'vodacom', 'telkom', 'sasol', 'bidvest', 'bidcorp', 'fnb', 'nedbank', 'firstrand', 'investec', 'growthpoint', 'redefine', 'j200', 'j203', 'j210', 'j580', 'j330', 'j430', 'j250', 'j257', 'j254', 'j673', 'j677', 'j790', 'j400', 'j430', 'j450', 'j590', 'j803', 'j805', 'j820', 'j827', 'j830', 'j835', 'j840', 'j853', 'j857', 'j858', 'j860', 'j863', 'j867', 'j868', 'j870', 'j875', 'j880', 'j890', 'j900', 'j910', 'j915', 'j920', 'j925', 'j930', 'j935', 'j940', 'j945', 'j950', 'j955', 'j960', 'j965', 'j970', 'j975', 'j980', 'j985', 'j990', 'j995', 'j998', 'j999'
+  ];
+  const text = `${article.headline} ${article.summary}`.toLowerCase();
+  const hasKeyword = keywords.some(k => text.includes(k));
+  const hasJseSymbol = Array.isArray(article.symbols) && article.symbols.some(s => s.endsWith('.JO'));
+  return hasKeyword || hasJseSymbol;
+};
+
 /* ------------------------------------------------------
    TEST EODHD SPOT GOLD ✅ TEMPORARY TEST
 ------------------------------------------------------ */
