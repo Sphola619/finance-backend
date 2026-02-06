@@ -1543,43 +1543,53 @@ app.get("/api/sa-markets", async (req, res) => {
   }
 });
 
+
+
 // ------------------------------------------------------
-// SA MARKET NEWS - Filtered from EODHD
+// SA MARKET NEWS - BusinessTech RSS Feed
 // ------------------------------------------------------
+const xml2js = require('xml2js');
+
 app.get("/api/sa-news", async (req, res) => {
   try {
-    // Use cached news if available
+    // Use cached news if available (5 min cache)
     if (newsCache && Date.now() - newsCacheTime < 5 * 60 * 1000) {
-      const saNews = newsCache.filter(article => isSouthAfricanNews(article));
-      return res.json(saNews);
+      return res.json(newsCache);
     }
 
-    // Fetch fresh news from EODHD
-    const r = await http.get(
-      `https://eodhd.com/api/news?api_token=${EODHD_KEY}&limit=50&offset=0&fmt=json`
-    );
-    if (!r.data || !Array.isArray(r.data)) {
-      return res.status(500).json({ error: "Failed to fetch news" });
-    }
+    // Fetch and parse BusinessTech RSS feed
+    const rssUrl = "https://businesstech.co.za/news/feed/";
+    const r = await axios.get(rssUrl);
+    const xml = r.data;
+    const parser = new xml2js.Parser({ explicitArray: false });
+    const feed = await parser.parseStringPromise(xml);
+    const items = feed.rss && feed.rss.channel && feed.rss.channel.item ? feed.rss.channel.item : [];
 
-    // Transform and filter for SA news
-    const transformedNews = r.data.map(article => {
-      let publisher = article.source || "EODHD";
-      if (!article.source && article.link) {
-        try {
-          const url = new URL(article.link);
-          publisher = url.hostname.replace('www.', '');
-        } catch (e) {
-          publisher = "EODHD";
-        }
+    // Transform RSS items to match frontend expectations
+    const transformedNews = (Array.isArray(items) ? items : [items]).map(item => {
+      // Defensive checks for missing fields
+      const headline = item.title || "Untitled";
+      const summary = item.description || headline;
+      const url = item.link || "https://businesstech.co.za/news/";
+      const source = "BusinessTech";
+      let datetime;
+      if (item.pubDate) {
+        const parsedDate = new Date(item.pubDate);
+        datetime = isNaN(parsedDate.getTime()) ? Math.floor(Date.now() / 1000) : Math.floor(parsedDate.getTime() / 1000);
+      } else {
+        datetime = Math.floor(Date.now() / 1000);
+      }
+      // Log if any field is missing or malformed
+      if (!item.title || !item.link || !item.pubDate) {
+        console.warn("⚠️ RSS item missing fields:", { headline, url, pubDate: item.pubDate });
       }
       return {
-        headline: article.title,
-        summary: article.content || article.title,
-        source: publisher,
-        url: article.link,
-        datetime: new Date(article.date).getTime() / 1000,
-        symbols: article.symbols || []
+        headline,
+        summary,
+        source,
+        url,
+        datetime,
+        symbols: []
       };
     });
 
@@ -1587,76 +1597,54 @@ app.get("/api/sa-news", async (req, res) => {
     newsCache = transformedNews;
     newsCacheTime = Date.now();
 
-    // Filter for South African news
-    const saNews = transformedNews.filter(article => isSouthAfricanNews(article));
-    res.json(saNews);
+    res.json(transformedNews);
   } catch (err) {
-    res.status(500).json({ error: "Failed to fetch SA news" });
+    res.status(500).json({ error: "Failed to fetch SA news", details: err.message });
   }
 });
 
 function isSouthAfricanNews(article) {
-  // Keywords and JSE symbol filter
+  // Expanded keywords, JSE tickers, and local news domains
   const keywords = [
-    'south africa', 'jse', 'rand', 'johannesburg', 'sarb', 'eskom', 'naspers', 'capitec', 'absa', 'standard bank', 'old mutual', 'sanlam', 'shoprite', 'woolworths', 'pick n pay', 'anglo', 'sibanye', 'impala', 'mtbps', 'minister of finance', 'treasury', 'pravin gordhan', 'tito mboweni', 'eoh', 'dis-chem', 'astral', 'remgro', 'psg', 'sun international', 'mtn', 'vodacom', 'telkom', 'sasol', 'bidvest', 'bidcorp', 'fnb', 'nedbank', 'firstrand', 'investec', 'growthpoint', 'redefine', 'j200', 'j203', 'j210', 'j580', 'j330', 'j430', 'j250', 'j257', 'j254', 'j673', 'j677', 'j790', 'j400', 'j430', 'j450', 'j590', 'j803', 'j805', 'j820', 'j827', 'j830', 'j835', 'j840', 'j853', 'j857', 'j858', 'j860', 'j863', 'j867', 'j868', 'j870', 'j875', 'j880', 'j890', 'j900', 'j910', 'j915', 'j920', 'j925', 'j930', 'j935', 'j940', 'j945', 'j950', 'j955', 'j960', 'j965', 'j970', 'j975', 'j980', 'j985', 'j990', 'j995', 'j998', 'j999'
+    // General
+    'south africa', 'south african', 'johannesburg', 'cape town', 'durban', 'pretoria', 'gauteng', 'kwazulu-natal', 'eastern cape', 'western cape', 'limpopo', 'mpumalanga', 'free state', 'north west', 'northern cape',
+    // Economy & finance
+    'rand', 'zar', 'sarb', 'reserve bank', 'minister of finance', 'treasury', 'budget speech', 'eskom', 'load shedding', 'transnet', 'pravin gordhan', 'tito mboweni', 'enoch godongwana', 'anc', 'parliament', 'cabinet',
+    // Major companies
+    'jse', 'naspers', 'capitec', 'absa', 'standard bank', 'old mutual', 'sanlam', 'shoprite', 'woolworths', 'pick n pay', 'anglo', 'anglogold', 'anglo american', 'sibanye', 'impala', 'mtbps', 'eoh', 'dis-chem', 'astral', 'remgro', 'psg', 'sun international', 'mtn', 'vodacom', 'telkom', 'sasol', 'bidvest', 'bidcorp', 'fnb', 'nedbank', 'firstrand', 'investec', 'growthpoint', 'redefine', 'multichoice', 'african rainbow', 'motus', 'truworths', 'mr price', 'clicks', 'spar', 'tiger brands', 'brait', 'famous brands', 'liberty', 'coronation', 'fortress', 'attacq', 'exxaro', 'northam', 'gold fields', 'harmony', 'arm', 'drdgold', 'pan african', 'sephaku', 'adcorp', 'curro', 'spur', 'distell', 'astral foods', 'pioneer foods', 'omnias', 'hulamin', 'bell equipment', 'mustek', 'altron', 'datatec', 'adapt it', 'argent', 'barloworld', 'bell', 'cashbuild', 'city lodge', 'clientele', 'combined motor', 'csg', 'digicore', 'elb', 'emira', 'eoh', 'eqstra', 'erb', 'finbond', 'grindrod', 'hudaco', 'huhtamaki', 'invicta', 'kumba', 'lewis', 'litha', 'mara', 'metair', 'murray & roberts', 'octodec', 'omnias', 'pinnacle', 'primeserv', 'raubex', 'rebosis', 'resilient', 'santam', 'sephaku', 'sibanye', 'stefanutti', 'stor-age', 'super group', 'texton', 'tongaat', 'vukile', 'zeder',
+    // Sectors
+    'mining', 'platinum', 'gold', 'palladium', 'chrome', 'coal', 'iron ore', 'retail', 'banking', 'insurance', 'property', 'telecom', 'energy', 'transport', 'logistics', 'construction', 'manufacturing',
+    // JSE indices
+    'j200', 'j203', 'j210', 'j580', 'j330', 'j430', 'j250', 'j257', 'j254', 'j673', 'j677', 'j790', 'j400', 'j430', 'j450', 'j590', 'j803', 'j805', 'j820', 'j827', 'j830', 'j835', 'j840', 'j853', 'j857', 'j858', 'j860', 'j863', 'j867', 'j868', 'j870', 'j875', 'j880', 'j890', 'j900', 'j910', 'j915', 'j920', 'j925', 'j930', 'j935', 'j940', 'j945', 'j950', 'j955', 'j960', 'j965', 'j970', 'j975', 'j980', 'j985', 'j990', 'j995', 'j998', 'j999'
+  ];
+  // Common JSE tickers (add more as needed)
+  const jseTickers = [
+    'AGL.JO', 'AMS.JO', 'ANG.JO', 'APN.JO', 'BID.JO', 'BVT.JO', 'CFR.JO', 'CLS.JO', 'DSY.JO', 'EXX.JO', 'FSR.JO', 'GFI.JO', 'GLN.JO', 'IMP.JO', 'INL.JO', 'INP.JO', 'MNP.JO', 'MTN.JO', 'NED.JO', 'NPN.JO', 'NRP.JO', 'OMU.JO', 'PRX.JO', 'REM.JO', 'SBK.JO', 'SLM.JO', 'SOL.JO', 'SSW.JO', 'VOD.JO', 'WHL.JO', 'JSE.JO', 'SHP.JO', 'TKG.JO', 'CPI.JO', 'DSY.JO', 'FSR.JO', 'GRT.JO', 'NED.JO', 'RDF.JO', 'SNT.JO', 'TBS.JO', 'TRU.JO', 'MND.JO', 'MNP.JO', 'BVT.JO', 'BID.JO', 'BTI.JO', 'ANG.JO', 'SOL.JO', 'MTN.JO', 'NPN.JO', 'ABG.JO', 'SBK.JO', 'FSR.JO', 'CPI.JO', 'DSY.JO', 'SLM.JO', 'OMU.JO', 'REM.JO', 'APN.JO', 'PRX.JO', 'VOD.JO', 'WHL.JO', 'SHP.JO', 'TKG.JO', 'GFI.JO', 'IMP.JO', 'AMS.JO', 'SSW.JO', 'EXX.JO', 'GLN.JO', 'ANG.JO', 'ARM.JO', 'DRD.JO', 'PAN.JO', 'HAR.JO', 'RBP.JO', 'THA.JO', 'S32.JO', 'KIO.JO', 'BHG.JO', 'MCG.JO', 'MTH.JO', 'RCL.JO', 'AVI.JO', 'PPC.JO', 'SNT.JO', 'TBS.JO', 'TRU.JO', 'MND.JO', 'MNP.JO', 'BVT.JO', 'BID.JO', 'BTI.JO'
+  ];
+  // Local news domains
+  const saDomains = [
+    'fin24', 'moneyweb', 'businesslive', 'businessday', 'sundaytimes', 'news24', 'iol.co.za', 'sowetanlive', 'citizen.co.za', 'enca.com', 'ecr.co.za', '702.co.za', 'ewn.co.za', 'businesstech', 'dailymaverick', 'mailandguardian', 'sabcnews', 'sabc.co.za', 'sagoodnews', 'sagoodnews.co.za', 'sagoodnews.com', 'sagoodnews.org', 'sagoodnews.net', 'sagoodnews.info', 'sagoodnews.biz', 'sagoodnews.tv', 'sagoodnews.fm', 'sagoodnews.mobi', 'sagoodnews.app', 'sagoodnews.africa', 'sagoodnews.ltd', 'sagoodnews.group', 'sagoodnews.agency', 'sagoodnews.media', 'sagoodnews.press', 'sagoodnews.news', 'sagoodnews.today', 'sagoodnews.world', 'sagoodnews.global', 'sagoodnews.africa', 'sagoodnews.co.za', 'sagoodnews.com', 'sagoodnews.org', 'sagoodnews.net', 'sagoodnews.info', 'sagoodnews.biz', 'sagoodnews.tv', 'sagoodnews.fm', 'sagoodnews.mobi', 'sagoodnews.app', 'sagoodnews.africa', 'sagoodnews.ltd', 'sagoodnews.group', 'sagoodnews.agency', 'sagoodnews.media', 'sagoodnews.press', 'sagoodnews.news', 'sagoodnews.today', 'sagoodnews.world', 'sagoodnews.global', 'businesstech.co.za', 'mybroadband.co.za', 'sagoodnews.co.za', 'sagoodnews.com', 'sagoodnews.org', 'sagoodnews.net', 'sagoodnews.info', 'sagoodnews.biz', 'sagoodnews.tv', 'sagoodnews.fm', 'sagoodnews.mobi', 'sagoodnews.app', 'sagoodnews.africa', 'sagoodnews.ltd', 'sagoodnews.group', 'sagoodnews.agency', 'sagoodnews.media', 'sagoodnews.press', 'sagoodnews.news', 'sagoodnews.today', 'sagoodnews.world', 'sagoodnews.global'
   ];
   const text = `${article.headline} ${article.summary}`.toLowerCase();
   const hasKeyword = keywords.some(k => text.includes(k));
-  const hasJseSymbol = Array.isArray(article.symbols) && article.symbols.some(s => s.endsWith('.JO'));
-  return hasKeyword || hasJseSymbol;
-};
-
-/* ------------------------------------------------------
-   TEST EODHD SPOT GOLD ✅ TEMPORARY TEST
------------------------------------------------------- */
-app.get("/api/test-eodhd-gold", async (req, res) => {
-  try {
-    console.log("🧪 Testing EODHD spot gold...");
-    
-    const symbols = [
-      "XAUUSD.FOREX",  // Gold spot
-      "XAGUSD.FOREX",  // Silver spot
-      "XPTUSD.FOREX",  // Platinum spot
-      "WTIUSD.FOREX"   // WTI Oil spot (if exists)
-    ];
-
-    const results = {};
-
-    for (const symbol of symbols) {
-      try {
-        // Try real-time endpoint
-        const url = `https://eodhd.com/api/real-time/${symbol}?api_token=${EODHD_KEY}&fmt=json`;
-        console.log(`📍 Testing: ${url}`);
-        
-        const r = await http.get(url);
-        
-        console.log(`✅ ${symbol} response:`, r.data);
-        
-        results[symbol] = {
-          status: "success",
-          data: r.data
-        };
-
-      } catch (err) {
-        console.error(`❌ ${symbol} error:`, err.message);
-        
-        results[symbol] = {
-          status: "error",
-          message: err.message,
-          response: err.response?.data
-        };
-      }
-
-      await sleep(500);
-    }
-
-    res.json(results);
-
-  } catch (err) {
-    console.error("❌ Test error:", err.message);
-    res.status(500).json({ error: err.message });
+  const hasJseSymbol = Array.isArray(article.symbols) && (
+    article.symbols.some(s => s.endsWith('.JO')) ||
+    article.symbols.some(s => jseTickers.includes(s))
+  );
+  let hasSADomain = false;
+  if (article.source) {
+    const src = article.source.toLowerCase();
+    hasSADomain = saDomains.some(domain => src.includes(domain));
   }
-});
+  if (article.url) {
+    try {
+      const url = new URL(article.url);
+      hasSADomain = hasSADomain || saDomains.some(domain => url.hostname.toLowerCase().includes(domain));
+    } catch {}
+  }
+  return hasKeyword || hasJseSymbol || hasSADomain;
+}
+
 
 /* ------------------------------------------------------
    JSE STOCKS FROM IRESS.CO.ZA
