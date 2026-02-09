@@ -156,13 +156,6 @@ const FOREX_PAIRS = [
   "XPT/USD"  // Platinum spot
 ];
 
-const YAHOO_COMMODITY_SYMBOLS = {
-  "Gold": "GC=F",
-  "Silver": "SI=F",
-  "Platinum": "PL=F",
-  "Crude Oil": "CL=F"
-};
-
 const INDEX_SYMBOLS = {
   "S&P 500": "GSPC.INDX",
   "NASDAQ 100": "NDX.INDX",
@@ -626,9 +619,9 @@ app.get("/api/forex-strength", async (req, res) => {
     Object.keys(avgStrength).forEach(currency => {
       const avg = avgStrength[currency];
       result[currency] = 
-        avg >= 0.3 ? "Strong" :
-        avg <= -0.3 ? "Weak" :
-        "Neutral";
+        avg >= 0.3 ? "Strong 🔥" :
+        avg <= -0.3 ? "Weak 🔻" :
+        "Neutral －";
     });
 
     res.json(result);
@@ -640,91 +633,136 @@ app.get("/api/forex-strength", async (req, res) => {
 });
 
 /* ------------------------------------------------------
-/* ------------------------------------------------------
-   COMMODITIES - Yahoo Only (Consistent Pricing) ✅
+   COMMODITY SENTIMENT (AGGREGATE)
 ------------------------------------------------------ */
-app.get("/api/commodities", async (req, res) => {
+app.get("/api/commodity-sentiment", async (req, res) => {
   try {
-    // Cache for 5 minutes
-    const COMMODITIES_CACHE_TTL = 5 * 60 * 1000;
-    
-    if (commoditiesCache && Date.now() - commoditiesCacheTime < COMMODITIES_CACHE_TTL)
-      return res.json(commoditiesCache);
+    // 1️⃣ REST commodities (e.g. Crude Oil)
+    const r = await http
+      .get(`http://localhost:${PORT}/api/commodities`)
+      .catch(() => null);
 
+    const restCommodities = Array.isArray(r?.data) ? r.data : [];
 
-    const results = [];
-    // Use EODHD symbols for live commodities
-    const EODHD_COMMODITIES = [
-      { name: "Gold", symbol: "XAUUSD" },
-      { name: "Silver", symbol: "XAGUSD" },
-      { name: "Platinum", symbol: "XPTUSD" },
-      { name: "Crude Oil", symbol: "CL=F" } // fallback to Yahoo for oil
-    ];
+    // 2️⃣ WebSocket metals (Gold, Silver, Platinum)
+    const wsMetals = Object.values(wsCommodityData)
+      .filter(Boolean) // remove nulls
+      .map(metal => ({
+        rawChange: metal.changePercent
+      }));
 
-    for (const commodity of EODHD_COMMODITIES) {
-      try {
-        let currentPrice, yesterdayClose, changePercent;
-        if (["XAUUSD.FOREX", "XAGUSD.FOREX", "XPTUSD.FOREX"].includes(commodity.symbol)) {
-          // Fetch from EODHD REST API
-          const eodhdUrl = `https://eodhd.com/api/real-time/${commodity.symbol}?api_token=${EODHD_KEY}&fmt=json`;
-          const r = await axios.get(eodhdUrl);
-          const data = r.data;
-          currentPrice = parseFloat(data.close);
-          yesterdayClose = parseFloat(data.previousClose);
-          if (isNaN(currentPrice) || isNaN(yesterdayClose) || yesterdayClose === 0) {
-            console.warn(`⚠️ Invalid EODHD prices for ${commodity.name}`);
-            continue;
-          }
-          changePercent = ((currentPrice - yesterdayClose) / yesterdayClose) * 100;
-          // Optionally, label gold as spot
-          if (commodity.symbol === "XAUUSD.FOREX") {
-            commodity.name = "Gold (Spot – OTC)";
-          }
-        } else {
-          // Fallback to Yahoo for oil
-          const yahooUrl = `${YAHOO_CHART}/${commodity.symbol}?interval=1d&range=5d`;
-          const yahooResp = await http.get(yahooUrl);
-          const yahooData = yahooResp.data.chart?.result?.[0];
-          if (!yahooData || !yahooData.indicators?.quote?.[0]?.close) {
-            console.warn(`⚠️ No Yahoo data for ${commodity.name}`);
-            continue;
-          }
-          const closes = yahooData.indicators.quote[0].close.filter(n => typeof n === "number");
-          if (closes.length < 2) {
-            console.warn(`⚠️ Insufficient data for ${commodity.name}: only ${closes.length} prices`);
-            continue;
-          }
-          currentPrice = closes.at(-1);
-          yesterdayClose = closes.at(-2);
-          if (isNaN(currentPrice) || isNaN(yesterdayClose) || yesterdayClose === 0) {
-            console.warn(`⚠️ Invalid Yahoo prices for ${commodity.name}`);
-            continue;
-          }
-          changePercent = ((currentPrice - yesterdayClose) / yesterdayClose) * 100;
-        }
-        results.push({
-          name: commodity.name,
-          symbol: commodity.symbol,
-          change: `${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%`,
-          trend: changePercent >= 0 ? "positive" : "negative",
-          price: currentPrice.toFixed(2),
-          rawChange: changePercent
-        });
-        console.log(`✅ ${commodity.name}: $${currentPrice.toFixed(2)} vs $${yesterdayClose.toFixed(2)} = ${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%`);
-      } catch (err) {
-        console.warn(`⚠️ ${commodity.name} fetch error:`, err.message);
-      }
-      await sleep(200);
+    // 3️⃣ Combine REST + WS sources
+    const combined = [...restCommodities, ...wsMetals];
+
+    if (!combined.length) {
+      return res.json({
+        Sentiment: "Neutral －",
+        Score: 0,
+        Count: 0
+      });
     }
-    results.sort((a, b) => Math.abs(b.rawChange) - Math.abs(a.rawChange));
-    commoditiesCache = results;
-    commoditiesCacheTime = Date.now();
-    res.json(results);
-    console.log(`✅ Loaded ${results.length} commodities (EODHD+Yahoo, cached 5min)`);
+
+    // 4️⃣ Aggregate sentiment
+    let total = 0;
+    let count = 0;
+
+    combined.forEach(item => {
+      const pct = parseFloat(item.rawChange);
+      if (!isNaN(pct)) {
+        total += pct;
+        count++;
+      }
+    });
+
+    const avg = count ? total / count : 0;
+
+    const Sentiment =
+      avg >= 0.3 ? "Bullish 🔥" :
+      avg <= -0.3 ? "Bearish 🔻" :
+      "Neutral －";
+
+    res.json({
+      Sentiment,
+      Score: Number(avg.toFixed(2)),
+      Count: count
+    });
 
   } catch (err) {
-    console.error("❌ /api/commodities error:", err.message);
-    res.status(500).json({ error: "Failed to fetch commodities" });
+    console.error("❌ /api/commodity-sentiment error:", err.message);
+    res.status(500).json({ error: "Failed to compute commodity sentiment" });
+  }
+});
+
+/* ------------------------------------------------------
+   COMMODITY SENTIMENT (YAHOO FUTURES ONLY)
+------------------------------------------------------ */
+app.get("/api/commodity-sentiment", async (req, res) => {
+  try {
+    const YAHOO_COMMODITIES = {
+      Gold: "GC=F",
+      Silver: "SI=F",
+      Platinum: "PL=F",
+      "Crude Oil": "CL=F"
+    };
+
+    let total = 0;
+    let count = 0;
+
+    for (const [name, symbol] of Object.entries(YAHOO_COMMODITIES)) {
+      try {
+        const r = await http.get(
+          `${YAHOO_CHART}/${symbol}?interval=1d&range=5d`
+        );
+
+        const data = r.data.chart?.result?.[0];
+        if (!data?.indicators?.quote?.[0]?.close) continue;
+
+        const closes = data.indicators.quote[0].close.filter(
+          n => typeof n === "number"
+        );
+
+        if (closes.length < 2) continue;
+
+        const current = closes.at(-1);
+        const previous = closes.at(-2);
+        const pct = ((current - previous) / previous) * 100;
+
+        if (!isNaN(pct)) {
+          total += pct;
+          count++;
+        }
+
+      } catch (err) {
+        console.warn(`⚠️ Sentiment fetch failed for ${name}:`, err.message);
+      }
+
+      await sleep(150);
+    }
+
+    if (!count) {
+      return res.json({
+        Sentiment: "Neutral －",
+        Score: 0,
+        Count: 0
+      });
+    }
+
+    const avg = total / count;
+
+    const Sentiment =
+      avg >= 0.3 ? "Bullish 🔥" :
+      avg <= -0.3 ? "Bearish 🔻" :
+      "Neutral －";
+
+    res.json({
+      Sentiment,
+      Score: Number(avg.toFixed(2)),
+      Count: count
+    });
+
+  } catch (err) {
+    console.error("❌ /api/commodity-sentiment error:", err.message);
+    res.status(500).json({ error: "Failed to compute commodity sentiment" });
   }
 });
 
@@ -2230,7 +2268,7 @@ function initForexWebSocket() {
         // 🔥 Handle spot metals (XAUUSD, XAGUSD, XPTUSD)
         if (["XAUUSD", "XAGUSD", "XPTUSD"].includes(msg.s)) {
           const payload = {
-            symbol: `${msg.s}.FOREX`, // normalize with REST format
+            symbol: msg.s, // keep symbol consistent with /api/commodities and DOM
             price,
             change,
             changePercent,
