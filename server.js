@@ -12,6 +12,18 @@ const wsCommodityData = {
   XPTUSD: null
 };
 
+const wsCryptoData = {
+  "BTC-USD": null,
+  "ETH-USD": null,
+  "XRP-USD": null,
+  "SOL-USD": null,
+  "ADA-USD": null,
+  "DOGE-USD": null,
+  "AVAX-USD": null,
+  "BNB-USD": null,
+  "LTC-USD": null
+};
+
 // Flag to indicate if WS is active for commodities
 let commoditiesWsActive = false;
 
@@ -33,18 +45,35 @@ const app = express();
    CORS CONFIGURATION FOR VERCEL
 ------------------------------------------------------ */
 app.use(cors({
-  origin: [
-    'http://localhost:5500',
-    'http://127.0.0.1:5500',
-    'https://marome-investments-finance.vercel.app',
-    /\.vercel\.app$/, // Allow all Vercel preview deployments
-  ],
+  origin: (origin, callback) => {
+    // Allow requests with no origin (file://, Safari local, Postman)
+    if (!origin) return callback(null, true);
+
+    const allowedOrigins = [
+      'http://localhost:5500',
+      'http://127.0.0.1:5500',
+      'https://marome-investments-finance.vercel.app'
+    ];
+
+    // Allow exact matches
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    // Allow all Vercel preview deployments
+    if (/\.vercel\.app$/.test(origin)) {
+      return callback(null, true);
+    }
+
+    return callback(new Error('Not allowed by CORS'));
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
 app.use(express.json());
+
 
 /* ------------------------------------------------------
    CONFIG / KEYS
@@ -123,6 +152,7 @@ let heatmapCache = null;
 let heatmapCacheTime = 0;
 let cryptoCache = null;
 let cryptoCacheTime = 0;
+const cryptoPrevPrice = {};
 let commoditiesCache = null;
 let commoditiesCacheTime = 0;
 let cryptoHeatmapCache = null;
@@ -633,68 +663,7 @@ app.get("/api/forex-strength", async (req, res) => {
 });
 
 /* ------------------------------------------------------
-   COMMODITY SENTIMENT (AGGREGATE)
------------------------------------------------------- */
-app.get("/api/commodity-sentiment", async (req, res) => {
-  try {
-    // 1️⃣ REST commodities (e.g. Crude Oil)
-    const r = await http
-      .get(`http://localhost:${PORT}/api/commodities`)
-      .catch(() => null);
-
-    const restCommodities = Array.isArray(r?.data) ? r.data : [];
-
-    // 2️⃣ WebSocket metals (Gold, Silver, Platinum)
-    const wsMetals = Object.values(wsCommodityData)
-      .filter(Boolean) // remove nulls
-      .map(metal => ({
-        rawChange: metal.changePercent
-      }));
-
-    // 3️⃣ Combine REST + WS sources
-    const combined = [...restCommodities, ...wsMetals];
-
-    if (!combined.length) {
-      return res.json({
-        Sentiment: "Neutral －",
-        Score: 0,
-        Count: 0
-      });
-    }
-
-    // 4️⃣ Aggregate sentiment
-    let total = 0;
-    let count = 0;
-
-    combined.forEach(item => {
-      const pct = parseFloat(item.rawChange);
-      if (!isNaN(pct)) {
-        total += pct;
-        count++;
-      }
-    });
-
-    const avg = count ? total / count : 0;
-
-    const Sentiment =
-      avg >= 0.3 ? "Bullish 🔥" :
-      avg <= -0.3 ? "Bearish 🔻" :
-      "Neutral －";
-
-    res.json({
-      Sentiment,
-      Score: Number(avg.toFixed(2)),
-      Count: count
-    });
-
-  } catch (err) {
-    console.error("❌ /api/commodity-sentiment error:", err.message);
-    res.status(500).json({ error: "Failed to compute commodity sentiment" });
-  }
-});
-
-/* ------------------------------------------------------
-   COMMODITY SENTIMENT (YAHOO FUTURES ONLY)
+   COMMODITY SENTIMENT (YAHOO FUTURES + STORY)
 ------------------------------------------------------ */
 app.get("/api/commodity-sentiment", async (req, res) => {
   try {
@@ -707,6 +676,9 @@ app.get("/api/commodity-sentiment", async (req, res) => {
 
     let total = 0;
     let count = 0;
+
+    const up = [];
+    const down = [];
 
     for (const [name, symbol] of Object.entries(YAHOO_COMMODITIES)) {
       try {
@@ -730,6 +702,9 @@ app.get("/api/commodity-sentiment", async (req, res) => {
         if (!isNaN(pct)) {
           total += pct;
           count++;
+
+          if (pct > 0) up.push(name);
+          else if (pct < 0) down.push(name);
         }
 
       } catch (err) {
@@ -743,7 +718,8 @@ app.get("/api/commodity-sentiment", async (req, res) => {
       return res.json({
         Sentiment: "Neutral －",
         Score: 0,
-        Count: 0
+        Count: 0,
+        Story: "Commodity markets are quiet today with insufficient data to determine direction."
       });
     }
 
@@ -754,10 +730,36 @@ app.get("/api/commodity-sentiment", async (req, res) => {
       avg <= -0.3 ? "Bearish 🔻" :
       "Neutral －";
 
+    // 📝 Build story
+    let story = "";
+
+    if (Sentiment === "Neutral －") {
+      story = `Commodity sentiment is neutral today. Markets are mixed, with ${
+        up.length ? up.join(", ") : "no commodities"
+      } trading higher while ${
+        down.length ? down.join(", ") : "others"
+      } remain under pressure, reflecting indecision across the commodities complex.`;
+    }
+
+    if (Sentiment === "Bullish 🔥") {
+      story = `Commodity markets are leaning bullish today, led by strength in ${
+        up.join(", ")
+      }, suggesting improving risk appetite across key raw materials.`;
+    }
+
+    if (Sentiment === "Bearish 🔻") {
+      story = `Commodity sentiment is bearish today as ${
+        down.join(", ")
+      } decline, pointing to weakening demand or profit-taking across commodity markets.`;
+    }
+
     res.json({
       Sentiment,
       Score: Number(avg.toFixed(2)),
-      Count: count
+      Count: count,
+      Up: up,
+      Down: down,
+      Story: story
     });
 
   } catch (err) {
@@ -827,6 +829,86 @@ app.get("/api/crypto", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch crypto" });
   }
 });
+
+/* ------------------------------------------------------
+   CRYPTO WEBSOCKET (REAL-TIME)
+------------------------------------------------------ */
+function initCryptoWebSocket() {
+  const wsUrl = `wss://ws.eodhistoricaldata.com/ws/crypto?api_token=${EODHD_KEY}`;
+  let ws = null;
+
+  function connect() {
+    console.log("📡 Connecting to EODHD Crypto WebSocket...");
+    ws = new WebSocket(wsUrl);
+
+    ws.on("open", () => {
+      console.log("✅ Crypto WebSocket connected");
+
+      ws.send(JSON.stringify({
+        action: "subscribe",
+        symbols: "BTC-USD,ETH-USD,XRP-USD,SOL-USD,ADA-USD,DOGE-USD,AVAX-USD,BNB-USD,LTC-USD"
+      }));
+    });
+
+    ws.on("message", (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        if (!msg.s || msg.p == null) return;
+
+        const symbol = msg.s;
+        const price = Number(msg.p);
+
+        const prev = cryptoPrevPrice[symbol];
+        let changePercent = null;
+
+        if (Number.isFinite(prev) && prev !== 0) {
+          changePercent = ((price - prev) / prev) * 100;
+        }
+
+        // Store current price for next tick
+        cryptoPrevPrice[symbol] = price;
+
+        // Skip first tick (no previous price yet)
+        if (!Number.isFinite(changePercent)) {
+          console.log(`₿ CRYPTO ${symbol}: ${price} (warming up)`);
+          return;
+        }
+
+        const payload = {
+          symbol,
+          price,
+          changePercent,
+          timestamp: Date.now()
+        };
+
+        if (wsCryptoData.hasOwnProperty(symbol)) {
+          wsCryptoData[symbol] = payload;
+          broadcastCryptoUpdate(payload);
+
+          console.log(
+            `₿ CRYPTO ${symbol}: ${price} (${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%)`
+          );
+        }
+
+      } catch (err) {
+        console.error("❌ Crypto WS parse error:", err.message);
+      }
+    });
+
+
+    ws.on("close", () => {
+      console.log("⚠️ Crypto WebSocket closed, reconnecting...");
+      setTimeout(connect, 5000);
+    });
+
+    ws.on("error", (err) => {
+      console.error("❌ Crypto WebSocket error:", err.message);
+    });
+  }
+
+  connect();
+}
+
 
 /* ------------------------------------------------------
    CORRELATION MATRIX 
@@ -2083,6 +2165,7 @@ server.listen(PORT, () => {
   console.log(`📡 Initializing EODHD WebSockets...`);
   initEODHDWebSocket();
   initForexWebSocket();
+  initCryptoWebSocket(); 
 });
 
 /* ------------------------------------------------------
@@ -2112,6 +2195,15 @@ function broadcastForexUpdate(payload) {
 function broadcastUSStockUpdate(payload) {
   const message = JSON.stringify({ type: "us-stock", ...payload });
   wsServer.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  });
+}
+
+function broadcastCryptoUpdate(payload) {
+  const message = JSON.stringify({ type: "crypto", ...payload });
+  wsServer.clients.forEach(client => {
     if (client.readyState === WebSocket.OPEN) {
       client.send(message);
     }
