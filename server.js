@@ -4,6 +4,7 @@ const httpServer = require("http");
 const cors = require("cors");
 const axios = require("axios");
 const WebSocket = require("ws");
+const path = require("path");
 
 // WebSocket cache for EODHD real-time commodities (spot metals)
 const wsCommodityData = {
@@ -42,38 +43,19 @@ const app = express();
 
 
 /* ------------------------------------------------------
-   CORS CONFIGURATION FOR VERCEL
+   CORS CONFIGURATION FOR DEVELOPMENT
 ------------------------------------------------------ */
 app.use(cors({
-  origin: (origin, callback) => {
-    // Allow requests with no origin (file://, Safari local, Postman)
-    if (!origin) return callback(null, true);
-
-    const allowedOrigins = [
-      'http://localhost:5500',
-      'http://127.0.0.1:5500',
-      'https://marome-investments-finance.vercel.app'
-    ];
-
-    // Allow exact matches
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
-
-    // Allow all Vercel preview deployments
-    if (/\.vercel\.app$/.test(origin)) {
-      return callback(null, true);
-    }
-
-    return callback(new Error('Not allowed by CORS'));
-  },
+  origin: true, // Allow all origins in development
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'Cache-Control']
 }));
 
 app.use(express.json());
 
+// Serve static files from Frontend directory
+app.use(express.static(path.join(__dirname, '../Frontend')));
 
 /* ------------------------------------------------------
    CONFIG / KEYS
@@ -279,21 +261,6 @@ const YAHOO_COMMODITY_SYMBOLS = {
   "Silver": "SI=F", 
   "Platinum": "PL=F",
   "Crude Oil": "CL=F"
-};
-
-// Forex heatmap symbols for Yahoo Finance
-const YAHOO_HEATMAP_SYMBOLS = {
-  "EUR/USD": "EURUSD=X",
-  "GBP/USD": "GBPUSD=X",
-  "USD/JPY": "USDJPY=X",
-  "USD/ZAR": "USDZAR=X",
-  "EUR/ZAR": "EURZAR=X",
-  "GBP/ZAR": "GBPZAR=X",
-  "AUD/USD": "AUDUSD=X",
-  "USD/CHF": "USDCHF=X",
-  "Gold": "GC=F",
-  "Silver": "SI=F",
-  "Platinum": "PL=F"
 };
 
 // ✅ Correlation Matrix Assets
@@ -576,37 +543,36 @@ app.get("/api/forex", async (req, res) => {
     // No caching - always return fresh WebSocket data
     const results = [];
 
-    for (const [pair, symbol] of Object.entries(EODHD_FOREX_SYMBOLS)) {
+    // 🚀 OPTIMIZATION: Process all pairs in parallel instead of sequential
+    const pairPromises = Object.entries(EODHD_FOREX_SYMBOLS).map(async ([pair, symbol]) => {
       try {
         // Try WebSocket data first (real-time)
         const wsSymbol = symbol.replace('.FOREX', ''); // Convert EURUSD.FOREX to EURUSD
         const wsData = wsForexData[wsSymbol];
-        
+
         if (wsData && wsData.price && wsData.changePercent !== undefined) {
           // WebSocket data is fresh (within 60 seconds)
           if (Date.now() - wsData.timestamp < 60 * 1000) {
-            results.push({
+            return {
               pair,
               name: pair,
               change: `${wsData.changePercent >= 0 ? "+" : ""}${wsData.changePercent.toFixed(2)}%`,
               trend: wsData.changePercent >= 0 ? "positive" : "negative",
               price: wsData.price,
-              rawChange: wsData.changePercent
-            });
-
-            console.log(`✅ ${pair} (WebSocket): ${wsData.price.toFixed(4)} (${wsData.changePercent >= 0 ? "+" : ""}${wsData.changePercent.toFixed(2)}%)`);
-            continue;
+              rawChange: wsData.changePercent,
+              source: "WebSocket"
+            };
           }
         }
 
         // Fallback to REST API
         const url = `https://eodhd.com/api/real-time/${symbol}?api_token=${EODHD_KEY}&fmt=json`;
-        const r = await http.get(url);
+        const r = await http.get(url, { timeout: 5000 });
         const data = r.data;
 
         if (!data || !data.close || !data.previousClose) {
           console.warn(`⚠️ No EODHD data for ${pair}`);
-          continue;
+          return null;
         }
 
         const currentPrice = parseFloat(data.close);
@@ -615,7 +581,7 @@ app.get("/api/forex", async (req, res) => {
 
         if (isNaN(currentPrice) || isNaN(changePercent)) {
           console.warn(`⚠️ Invalid data for ${pair}`);
-          continue;
+          return null;
         }
 
         // Store previous close for WebSocket accuracy
@@ -624,23 +590,32 @@ app.get("/api/forex", async (req, res) => {
           forexPrevClose[wsSymbolRest] = previousClose;
         }
 
-        results.push({
+        return {
           pair,
           name: pair,
           change: `${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%`,
           trend: changePercent >= 0 ? "positive" : "negative",
           price: currentPrice,
-          rawChange: changePercent
-        });
-
-        console.log(`✅ ${pair} (EODHD): ${currentPrice.toFixed(4)} (${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%)`);
+          rawChange: changePercent,
+          source: "EODHD"
+        };
 
       } catch (err) {
         console.warn(`⚠️ EODHD FX error for ${symbol}:`, err.message);
+        return null;
       }
+    });
 
-      await sleep(100);
-    }
+    // Wait for all pairs to complete
+    const pairResults = await Promise.all(pairPromises);
+
+    // Filter out null results and add to results array
+    pairResults.forEach(result => {
+      if (result) {
+        results.push(result);
+        console.log(`✅ ${result.pair} (${result.source}): ${result.price.toFixed(4)} (${result.change})`);
+      }
+    });
 
     res.json(results);
 
@@ -1415,10 +1390,29 @@ app.get("/api/forex-heatmap", async (req, res) => {
     if (heatmapCache && Date.now() - heatmapCacheTime < HEATMAP_TTL)
       return res.json(heatmapCache);
 
-    const results = {};
+    const results = {}; // Initialize results object
 
-    for (const [label, symbol] of Object.entries(YAHOO_HEATMAP_SYMBOLS)) {
+    // Forex heatmap symbols - consistent with crypto heatmap approach
+    const forexSymbols = {
+      "EUR/USD": "EURUSD=X",
+      "GBP/USD": "GBPUSD=X",
+      "USD/JPY": "USDJPY=X",
+      "USD/CHF": "USDCHF=X",
+      "USD/ZAR": "USDZAR=X",
+      "EUR/ZAR": "EURZAR=X",
+      "GBP/ZAR": "GBPZAR=X",
+      "AUD/USD": "AUDUSD=X",
+      "Gold": "GC=F",
+      "Silver": "SI=F",
+      "Platinum": "PL=F",
+      "Crude Oil (WTI)": "CL=F"
+    };
 
+
+    // 🚀 SIMPLIFIED: Process one symbol at a time to avoid Yahoo Finance issues
+    const symbolEntries = Object.entries(forexSymbols);
+
+    for (const [label, symbol] of symbolEntries) {
       const timeframes = {
         "1h": { interval: "5m", range: "1d" },
         "4h": { interval: "15m", range: "5d" },
@@ -1428,12 +1422,13 @@ app.get("/api/forex-heatmap", async (req, res) => {
 
       const tfResults = {};
 
-      for (const [tf, params] of Object.entries(timeframes)) {
+      // 🚀 OPTIMIZATION: Process all timeframes for one symbol in parallel (like crypto heatmap)
+      const timeframePromises = Object.entries(timeframes).map(async ([tf, params]) => {
         let pct = null;
 
         try {
           const url = `${YAHOO_CHART}/${symbol}?interval=${params.interval}&range=${params.range}`;
-          const r = await http.get(url);
+          const r = await http.get(url, { timeout: 10000 }); // 10s timeout
           const data = r.data.chart?.result?.[0];
 
           if (data && data.indicators?.quote?.[0]?.close) {
@@ -1454,34 +1449,24 @@ app.get("/api/forex-heatmap", async (req, res) => {
             }
           }
 
-          // ✅ Fallback for 1h: if no data with 5m, try 15m interval
-          if (pct === null && tf === "1h") {
-            const fallbackUrl = `${YAHOO_CHART}/${symbol}?interval=15m&range=5d`;
-            const fallbackR = await http.get(fallbackUrl);
-            const fallbackData = fallbackR.data.chart?.result?.[0];
-
-            if (fallbackData && fallbackData.indicators?.quote?.[0]?.close) {
-              const fallbackCloses = fallbackData.indicators.quote[0].close.filter(n => typeof n === "number");
-              
-              // For 1h with 15m intervals, we need 4 data points (4 x 15min = 60min)
-              if (fallbackCloses.length >= 5) {
-                const current = fallbackCloses.at(-1);
-                const previous = fallbackCloses.at(-5); // 1 hour ago (4 intervals)
-                pct = ((current - previous) / previous) * 100;
-              }
-            }
-          }
-
         } catch (err) {
           console.warn(`⚠️ Heatmap error ${symbol} (${tf}):`, err.message);
         }
 
+        return { tf, pct };
+      });
+
+      // Wait for all timeframes to complete for this symbol
+      const timeframeResults = await Promise.all(timeframePromises);
+      timeframeResults.forEach(({ tf, pct }) => {
         tfResults[tf] = pct;
-        await sleep(100);
-      }
+      });
 
       results[label] = tfResults;
       console.log(`✅ Heatmap loaded for ${label}:`, tfResults);
+
+      // Delay between symbols
+      await sleep(500);
     }
 
     heatmapCache = results;
@@ -2374,6 +2359,13 @@ When users ask where to find specific data or features, guide them to the approp
       details: error.response?.data?.error?.message || error.message
     });
   }
+});
+
+/* ------------------------------------------------------
+   SERVE FRONTEND - Catch-all handler for SPA routing
+------------------------------------------------------ */
+app.use((req, res) => {
+  res.sendFile(path.join(__dirname, '../Frontend/index.html'));
 });
 
 /* ------------------------------------------------------
