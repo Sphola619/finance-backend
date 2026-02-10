@@ -104,10 +104,7 @@ const wsStocksData = {
   "V.US": null,
   "KO.US": null,
   "JNJ.US": null,
-  "WMT.US": null,
-  "MA.US": null,
-  "PFE.US": null,
-  "NFLX.US": null
+  "WMT.US": null
 };
 
 // WebSocket cache for EODHD real-time forex
@@ -2504,13 +2501,13 @@ function initEODHDWebSocket() {
     ws.on("open", () => {
       console.log("✅ EODHD WebSocket connected");
       
-      // Subscribe to US indices and stocks
+      // Subscribe to US indices and major stocks (reduced to avoid EODHD limits)
       const subscribeMsg = {
         action: "subscribe",
-        symbols: "GSPC.INDX,NDX.INDX,DJI.INDX,AAPL.US,MSFT.US,AMZN.US,GOOGL.US,TSLA.US,NVDA.US,META.US,JPM.US,V.US,KO.US,JNJ.US,WMT.US,MA.US,PFE.US,NFLX.US"
+        symbols: "GSPC.INDX,NDX.INDX,DJI.INDX,AAPL.US,MSFT.US,AMZN.US,GOOGL.US,TSLA.US,NVDA.US,META.US,JPM.US,V.US,KO.US,JNJ.US,WMT.US"
       };
       ws.send(JSON.stringify(subscribeMsg));
-      console.log("📊 Subscribed to: 3 indices + 15 US stocks");
+      console.log("📊 Subscribed to: 3 indices + 12 major US stocks");
 
       // Send ping every 30 seconds to keep connection alive
       pingInterval = setInterval(() => {
