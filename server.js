@@ -1459,8 +1459,8 @@ app.get("/api/crypto-heatmap", async (req, res) => {
 
     const results = {};
 
-    for (const [name, symbol] of Object.entries(cryptoSymbols)) {
-
+    // 🚀 OPTIMIZATION: Process all symbols in parallel instead of sequential
+    const symbolPromises = Object.entries(cryptoSymbols).map(async ([name, symbol]) => {
       const timeframes = {
         "1h": { interval: "5m", range: "1d" },
         "4h": { interval: "15m", range: "5d" },
@@ -1470,12 +1470,13 @@ app.get("/api/crypto-heatmap", async (req, res) => {
 
       const tfResults = {};
 
-      for (const [tf, params] of Object.entries(timeframes)) {
+      // 🚀 OPTIMIZATION: Process all timeframes for one symbol in parallel
+      const timeframePromises = Object.entries(timeframes).map(async ([tf, params]) => {
         let pct = null;
 
         try {
           const url = `${YAHOO_CHART}/${symbol}?interval=${params.interval}&range=${params.range}`;
-          const r = await http.get(url);
+          const r = await http.get(url, { timeout: 5000 }); // ⏰ Add 5s timeout
           const data = r.data.chart?.result?.[0];
 
           if (data && data.indicators?.quote?.[0]?.close) {
@@ -1500,13 +1501,24 @@ app.get("/api/crypto-heatmap", async (req, res) => {
           console.warn(`⚠️ Crypto heatmap error ${symbol} (${tf}):`, err.message);
         }
 
-        tfResults[tf] = pct;
-        await sleep(100);
-      }
+        return { tf, pct };
+      });
 
-      results[name] = tfResults;
+      // Wait for all timeframes to complete for this symbol
+      const timeframeResults = await Promise.all(timeframePromises);
+      timeframeResults.forEach(({ tf, pct }) => {
+        tfResults[tf] = pct;
+      });
+
       console.log(`✅ Crypto heatmap loaded for ${name}:`, tfResults);
-    }
+      return { name, tfResults };
+    });
+
+    // Wait for all symbols to complete
+    const symbolResults = await Promise.all(symbolPromises);
+    symbolResults.forEach(({ name, tfResults }) => {
+      results[name] = tfResults;
+    });
 
     cryptoHeatmapCache = results;
     cryptoHeatmapCacheTime = Date.now();
