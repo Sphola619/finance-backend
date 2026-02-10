@@ -1195,10 +1195,17 @@ async function fetchEodCryptoMovers() {
 async function fetchCommodityMovers() {
   const items = [];
 
+  // Map WebSocket symbols to proper names
+  const commodityNameMap = {
+    "XAUUSD": "Gold",
+    "XAGUSD": "Silver",
+    "XPTUSD": "Platinum"
+  };
+
   // ✅ Use WebSocket data first (real-time, within 60 seconds)
   for (const [symbol, data] of Object.entries(wsCommodityData)) {
     if (data && Date.now() - data.timestamp < 60 * 1000) {
-      const name = symbol.replace("USD", "").replace("X", ""); // XAUUSD -> AU, XAGUSD -> AG, etc.
+      const name = commodityNameMap[symbol] || symbol.replace("USD", "").replace("X", ""); // Use proper name or fallback
       items.push(formatMover(name, symbol, data.changePercent, "Commodity"));
       console.log(`✅ Commodity mover (WS): ${name} ${data.changePercent >= 0 ? "+" : ""}${data.changePercent.toFixed(2)}%`);
     }
