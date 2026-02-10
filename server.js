@@ -198,7 +198,7 @@ async function refreshForexPrevClose() {
     try {
       const wsSymbol = symbol.replace(".FOREX", "");
       const url = `https://eodhd.com/api/real-time/${symbol}?api_token=${EODHD_KEY}&fmt=json`;
-      const r = await http.get(url);
+      const r = await api.get(url);
       const previousClose = parseFloat(r.data?.previousClose);
       const changePercent = parseFloat(r.data?.change_p);
       const close = parseFloat(r.data?.close);
@@ -235,7 +235,7 @@ async function refreshCryptoPrevClose() {
   for (const [wsSymbol, apiSymbol] of Object.entries(cryptoSymbols)) {
     try {
       const url = `https://eodhd.com/api/real-time/${apiSymbol}?api_token=${EODHD_KEY}&fmt=json`;
-      const r = await http.get(url);
+      const r = await api.get(url);
       const previousClose = parseFloat(r.data?.previousClose);
       const changePercent = parseFloat(r.data?.change_p);
       const close = parseFloat(r.data?.close);
@@ -278,7 +278,7 @@ const YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart";
 /* ------------------------------------------------------
    HELPERS
 ------------------------------------------------------ */
-const http = axios.create({
+const api = axios.create({
   timeout: 10000,
   headers: { "User-Agent": "MaromeBot/1.0" }
 });
@@ -330,7 +330,7 @@ app.get("/api/news", async (req, res) => {
 
     console.log("📰 Fetching news from EODHD...");
     
-    const r = await http.get(
+    const r = await api.get(
       `https://eodhd.com/api/news?api_token=${EODHD_KEY}&limit=50&offset=0&fmt=json`
     );
 
@@ -395,7 +395,7 @@ app.get("/api/stock-news", async (req, res) => {
     console.log("📰 Fetching stock-specific news from EODHD...");
     
     // Fetch general financial news (includes stock-related news)
-    const r = await http.get(
+    const r = await api.get(
       `https://eodhd.com/api/news?api_token=${EODHD_KEY}&limit=50&offset=0&fmt=json`
     );
 
@@ -457,7 +457,7 @@ app.get("/api/indices", async (req, res) => {
       try {
         // Yahoo Finance for JSE Top 40
         if (name === "JSE Top 40") {
-          const r = await http.get(`${YAHOO_CHART}/${symbol}?interval=1d&range=5d`);
+          const r = await api.get(`${YAHOO_CHART}/${symbol}?interval=1d&range=5d`);
           const data = r.data.chart?.result?.[0];
           
           if (!data || !data.meta || !data.indicators?.quote?.[0]) {
@@ -487,7 +487,7 @@ app.get("/api/indices", async (req, res) => {
         } else {
           // Use EODHD REST API for US indices
           const url = `https://eodhd.com/api/real-time/${symbol}?api_token=${EODHD_KEY}&fmt=json`;
-          const r = await http.get(url);
+          const r = await api.get(url);
           const data = r.data;
 
           if (!data || !data.close || !data.previousClose) {
@@ -564,7 +564,7 @@ app.get("/api/forex", async (req, res) => {
 
         // Fallback to REST API
         const url = `https://eodhd.com/api/real-time/${symbol}?api_token=${EODHD_KEY}&fmt=json`;
-        const r = await http.get(url, { timeout: 5000 });
+        const r = await api.get(url, { timeout: 5000 });
         const data = r.data;
 
         if (!data || !data.close || !data.previousClose) {
@@ -629,7 +629,7 @@ app.get("/api/forex", async (req, res) => {
 ------------------------------------------------------ */
 app.get("/api/forex-strength", async (req, res) => {
   try {
-    const r = await http.get(`http://localhost:${PORT}/api/forex`).catch(() => null);
+    const r = await api.get(`http://localhost:${PORT}/api/forex`).catch(() => null);
     const data = r?.data || [];
 
     const pairCount = { USD: 0, EUR: 0, GBP: 0, JPY: 0, AUD: 0, CHF: 0, ZAR: 0 };
@@ -697,7 +697,7 @@ app.get("/api/commodity-sentiment", async (req, res) => {
 
     for (const [name, symbol] of Object.entries(YAHOO_COMMODITIES)) {
       try {
-        const r = await http.get(
+        const r = await api.get(
           `${YAHOO_CHART}/${symbol}?interval=1d&range=5d`
         );
 
@@ -792,8 +792,16 @@ app.get("/api/commodities", async (req, res) => {
     const results = [];
     for (const [symbol, data] of Object.entries(wsCommodityData)) {
       if (data && Date.now() - data.timestamp < 60 * 1000) {
+        // Map symbols to proper names
+        const nameMap = {
+          "XAUUSD": "Gold",
+          "XAGUSD": "Silver", 
+          "XPTUSD": "Platinum"
+        };
+        const name = nameMap[symbol] || symbol.replace("USD", "").replace("X", "");
+        
         results.push({
-          name: symbol.replace("USD", "").replace("X", ""), // XAUUSD -> AU, XAGUSD -> AG, etc.
+          name,
           symbol,
           price: data.price.toFixed(2),
           change: `${data.changePercent >= 0 ? "+" : ""}${data.changePercent.toFixed(2)}%`,
@@ -827,7 +835,7 @@ app.get("/api/commodities", async (req, res) => {
     for (const [name, symbol] of Object.entries(YAHOO_COMMODITIES)) {
       try {
         const url = `${YAHOO_CHART}/${symbol}?interval=1d&range=5d`;
-        const r = await http.get(url);
+        const r = await api.get(url);
         const data = r.data.chart?.result?.[0];
         if (!data) continue;
 
@@ -917,7 +925,7 @@ app.get("/api/crypto", async (req, res) => {
     for (const [name, symbol] of Object.entries(cryptoSymbols)) {
       try {
         const url = `${YAHOO_CHART}/${symbol}?interval=1d&range=5d`;
-        const r = await http.get(url);
+        const r = await api.get(url);
         const data = r.data.chart?.result?.[0];
         if (!data) continue;
 
@@ -1063,7 +1071,7 @@ app.get("/api/correlation-matrix", async (req, res) => {
     for (const [name, symbol] of Object.entries(CORRELATION_ASSETS)) {
       try {
         const url = `${YAHOO_CHART}/${symbol}?interval=1d&range=${period}d`;
-        const r = await http.get(url);
+        const r = await api.get(url);
         const data = r.data.chart?.result?.[0];
 
         if (!data) {
@@ -1165,7 +1173,7 @@ async function fetchEodCryptoMovers() {
     if (items.some(item => item.symbol === symbol)) continue;
 
     try {
-      const r = await http.get(`${YAHOO_CHART}/${symbol}?interval=1d&range=5d`, { timeout: 5000 });
+      const r = await api.get(`${YAHOO_CHART}/${symbol}?interval=1d&range=5d`, { timeout: 5000 });
       const data = r.data.chart?.result?.[0];
       if (!data) continue;
 
@@ -1220,7 +1228,7 @@ async function fetchCommodityMovers() {
 
     try {
       const url = `${YAHOO_CHART}/${symbol}?interval=1d&range=5d`;
-      const r = await http.get(url, { timeout: 5000 });
+      const r = await api.get(url, { timeout: 5000 });
       const data = r.data.chart?.result?.[0];
 
       if (!data) continue;
@@ -1250,7 +1258,7 @@ async function fetchEodTopStocks(limit = 6) {
 
   const fetchSide = async (side) => {
     try {
-      const r = await http.get(
+      const r = await api.get(
         `https://eodhd.com/api/top?api_token=${EODHD_KEY}&screener=${side}&limit=${limit}&fmt=json`
       );
 
@@ -1301,7 +1309,7 @@ async function fetchForexMovers() {
   // Fallback to TwelveData API for any missing pairs
   try {
     const url = `https://api.twelvedata.com/quote?symbol=${FOREX_PAIRS.join(",")}&apikey=${TWELVEDATA_KEY}`;
-    const r = await http.get(url, { timeout: 5000 });
+    const r = await api.get(url, { timeout: 5000 });
 
     FOREX_PAIRS.forEach(pair => {
       // Skip if we already have this from WebSocket
@@ -1344,7 +1352,7 @@ app.get("/api/all-movers", async (req, res) => {
 
     for (const [name, symbol] of Object.entries(INDEX_SYMBOLS)) {
       try {
-        const r = await http.get(`${YAHOO_CHART}/${symbol}?interval=1d&range=5d`);
+        const r = await api.get(`${YAHOO_CHART}/${symbol}?interval=1d&range=5d`);
         const data = r.data.chart?.result?.[0];
         if (!data) continue;
 
@@ -1432,7 +1440,7 @@ app.get("/api/forex-heatmap", async (req, res) => {
 
         try {
           const url = `${YAHOO_CHART}/${symbol}?interval=${params.interval}&range=${params.range}`;
-          const r = await http.get(url, { timeout: 10000 }); // 10s timeout
+          const r = await api.get(url, { timeout: 10000 }); // 10s timeout
           const data = r.data.chart?.result?.[0];
 
           if (data && data.indicators?.quote?.[0]?.close) {
@@ -1522,7 +1530,7 @@ app.get("/api/crypto-heatmap", async (req, res) => {
 
         try {
           const url = `${YAHOO_CHART}/${symbol}?interval=${params.interval}&range=${params.range}`;
-          const r = await http.get(url, { timeout: 5000 }); // ⏰ Add 5s timeout
+          const r = await api.get(url, { timeout: 5000 }); // ⏰ Add 5s timeout
           const data = r.data.chart?.result?.[0];
 
           if (data && data.indicators?.quote?.[0]?.close) {
@@ -1598,7 +1606,7 @@ app.get("/api/economic-calendar", async (req, res) => {
     console.log("📅 Fetching economic calendar from FMP...");
     console.log(`📆 Date range: ${fromDate} to ${toDate}`);
     
-    const r = await http.get(url);
+    const r = await api.get(url);
     
     if (!Array.isArray(r.data) || r.data.length === 0) {
       console.log("⚠️ No events found from FMP");
@@ -1792,7 +1800,7 @@ app.get("/api/us-stocks", async (req, res) => {
         }
 
         // Fallback to REST API
-        const r = await http.get(
+        const r = await api.get(
           `https://eodhd.com/api/real-time/${symbol}?api_token=${EODHD_KEY}&fmt=json`
         );
 
@@ -1854,21 +1862,21 @@ app.get("/api/us-stocks", async (req, res) => {
 ------------------------------------------------------ */
 app.get("/api/sa-markets", async (req, res) => {
   try {
-    const indicesResp = await http.get(`http://localhost:${PORT}/api/indices`).catch(() => ({ data: [] }));
+    const indicesResp = await api.get(`http://localhost:${PORT}/api/indices`).catch(() => ({ data: [] }));
     const allIndices = indicesResp.data || [];
     
     const jseIndices = allIndices.filter(idx => 
       idx.name.includes("JSE") || idx.symbol.includes(".JO")
     );
 
-    const forexResp = await http.get(`http://localhost:${PORT}/api/forex`).catch(() => ({ data: [] }));
+    const forexResp = await api.get(`http://localhost:${PORT}/api/forex`).catch(() => ({ data: [] }));
     const allForex = forexResp.data || [];
     
     const zarForex = allForex.filter(fx => 
       fx.pair.includes("ZAR")
     );
 
-    const commoditiesResp = await http.get(`http://localhost:${PORT}/api/commodities`).catch(() => ({ data: [] }));
+    const commoditiesResp = await api.get(`http://localhost:${PORT}/api/commodities`).catch(() => ({ data: [] }));
     const allCommodities = commoditiesResp.data || [];
 
     const usdZarPair = zarForex.find(fx => fx.pair === "USD/ZAR");
@@ -2379,7 +2387,8 @@ const server = httpServer.createServer(app);
 
 server.listen(PORT, () => {
   console.log(`🚀 Marome Backend running on port ${PORT}`);
-  console.log(`📊 Correlation Matrix API: http://localhost:${PORT}/api/correlation-matrix?period=30`);
+  console.log(`� Frontend WebSocket server running on ws://localhost:${PORT}`);
+  console.log(`�📊 Correlation Matrix API: http://localhost:${PORT}/api/correlation-matrix?period=30`);
   console.log(`🧪 EODHD Test: http://localhost:${PORT}/api/test-eodhd-gold`);
   console.log(`💬 Marome Chat AI: http://localhost:${PORT}/api/chat`);
   console.log(`📡 Initializing EODHD WebSockets...`);
@@ -2456,8 +2465,6 @@ wsServer.on("connection", (socket) => {
   });
 });
 
-console.log(`🔌 Frontend WebSocket server running on ws://localhost:${PORT}`);
-
 function broadcastForexUpdate(payload) {
   const message = JSON.stringify({ type: "forex", ...payload });
   wsServer.clients.forEach((client) => {
@@ -2469,6 +2476,15 @@ function broadcastForexUpdate(payload) {
 
 function broadcastUSStockUpdate(payload) {
   const message = JSON.stringify({ type: "us-stock", ...payload });
+  wsServer.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  });
+}
+
+function broadcastUSIndexUpdate(payload) {
+  const message = JSON.stringify({ type: "us-index", ...payload });
   wsServer.clients.forEach((client) => {
     if (client.readyState === WebSocket.OPEN) {
       client.send(message);
@@ -2489,7 +2505,7 @@ function broadcastCryptoUpdate(payload) {
    EODHD WEBSOCKET FOR REAL-TIME US INDICES & STOCKS
 ------------------------------------------------------ */
 function initEODHDWebSocket() {
-  const wsUrl = `wss://ws.eodhistoricaldata.com/ws/us?api_token=${EODHD_KEY}`;
+  const wsUrl = `wss://ws.eodhistoricaldata.com/ws/us-quote?api_token=${EODHD_KEY}`;
   let ws = null;
   let reconnectInterval = 5000;
   let pingInterval = null;
@@ -2499,7 +2515,7 @@ function initEODHDWebSocket() {
     ws = new WebSocket(wsUrl);
 
     ws.on("open", () => {
-      console.log("✅ EODHD WebSocket connected");
+      console.log("✅ EODHD WebSocket connected successfully!");
       
       // Subscribe to US indices and major stocks (reduced to avoid EODHD limits)
       const subscribeMsg = {
@@ -2508,6 +2524,8 @@ function initEODHDWebSocket() {
       };
       ws.send(JSON.stringify(subscribeMsg));
       console.log("📊 Subscribed to: 3 indices + 12 major US stocks");
+      console.log("🔄 REST API fallback also active (30s intervals)");
+
 
       // Send ping every 30 seconds to keep connection alive
       pingInterval = setInterval(() => {
@@ -2536,6 +2554,12 @@ function initEODHDWebSocket() {
         if (wsIndicesData.hasOwnProperty(msg.s)) {
           wsIndicesData[msg.s] = payload;
           console.log(`📈 INDEX ${msg.s}: ${msg.p} (${msg.cp >= 0 ? "+" : ""}${msg.cp}%)`);
+          broadcastUSIndexUpdate({
+            symbol: msg.s,
+            price: msg.p,
+            changePercent: msg.cp,
+            timestamp: Date.now()
+          });
         }
         
         // Store real-time data for US stocks
@@ -2556,6 +2580,7 @@ function initEODHDWebSocket() {
 
     ws.on("error", (err) => {
       console.error("❌ EODHD WebSocket error:", err.message);
+      console.log("🔄 Falling back to REST API polling only");
     });
 
     ws.on("close", () => {
@@ -2569,7 +2594,72 @@ function initEODHDWebSocket() {
     });
   }
 
+  // Add REST API fallback polling every 30 seconds
+  function startRestFallback() {
+    console.log("🔄 Starting REST API fallback for US stocks and indices...");
+    setInterval(async () => {
+      try {
+        // Update indices
+        for (const [name, symbol] of Object.entries(INDEX_SYMBOLS)) {
+          if (name === "JSE Top 40") continue; // Skip JSE, only do US indices
+          
+          try {
+            const url = `https://eodhd.com/api/real-time/${symbol}?api_token=${EODHD_KEY}&fmt=json`;
+            const r = await api.get(url);
+            const data = r.data;
+
+            if (data && data.close && data.change_p) {
+              const payload = {
+                symbol,
+                price: parseFloat(data.close),
+                changePercent: parseFloat(data.change_p),
+                timestamp: Date.now()
+              };
+
+              // Update cache and broadcast
+              if (wsIndicesData.hasOwnProperty(symbol)) {
+                wsIndicesData[symbol] = payload;
+                console.log(`📊 INDEX REST ${symbol}: ${payload.price.toFixed(2)} (${payload.changePercent >= 0 ? "+" : ""}${payload.changePercent.toFixed(2)}%)`);
+                broadcastUSIndexUpdate(payload);
+              }
+            }
+          } catch (err) {
+            // Silently ignore individual index errors
+          }
+        }
+
+        // Update stocks
+        for (const symbol of Object.keys(wsStocksData)) {
+          try {
+            const url = `https://eodhd.com/api/real-time/${symbol}?api_token=${EODHD_KEY}&fmt=json`;
+            const r = await api.get(url);
+            const data = r.data;
+
+            if (data && data.close && data.change_p) {
+              const payload = {
+                symbol,
+                price: parseFloat(data.close),
+                changePercent: parseFloat(data.change_p),
+                timestamp: Date.now()
+              };
+
+              // Update cache and broadcast
+              wsStocksData[symbol] = payload;
+              console.log(`📈 STOCK REST ${symbol}: ${payload.price.toFixed(2)} (${payload.changePercent >= 0 ? "+" : ""}${payload.changePercent.toFixed(2)}%)`);
+              broadcastUSStockUpdate(payload);
+            }
+          } catch (err) {
+            // Silently ignore individual stock errors
+          }
+        }
+      } catch (err) {
+        // Silently ignore polling errors
+      }
+    }, 30000); // Poll every 30 seconds
+  }
+
   connect();
+  startRestFallback(); // Start REST fallback immediately
 }
 
 /* ------------------------------------------------------
@@ -2645,8 +2735,17 @@ function initForexWebSocket() {
           wsCommodityData[msg.s] = payload;
           commoditiesWsActive = true;
 
+          // Map symbols to proper names for WebSocket broadcast
+          const nameMap = {
+            "XAUUSD": "Gold",
+            "XAGUSD": "Silver", 
+            "XPTUSD": "Platinum"
+          };
+          const commodityName = nameMap[msg.s];
+
           broadcastCommodityUpdate({
-            symbol: payload.symbol,
+            symbol: msg.s,
+            name: commodityName,
             price: payload.price,
             changePercent: payload.changePercent,
             timestamp: payload.timestamp
