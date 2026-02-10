@@ -274,6 +274,14 @@ async function refreshCryptoPrevClose() {
   }
 }
 
+const YAHOO_COMMODITY_SYMBOLS = {
+  "Gold": "GC=F",
+  "Silver": "SI=F", 
+  "Platinum": "PL=F",
+  "Crude Oil": "CL=F"
+};
+
+// Forex heatmap symbols for Yahoo Finance
 const YAHOO_HEATMAP_SYMBOLS = {
   "EUR/USD": "EURUSD=X",
   "GBP/USD": "GBPUSD=X",
@@ -283,10 +291,9 @@ const YAHOO_HEATMAP_SYMBOLS = {
   "GBP/ZAR": "GBPZAR=X",
   "AUD/USD": "AUDUSD=X",
   "USD/CHF": "USDCHF=X",
-  Gold: "GC=F",        //  Changed from ETF (GLD) to futures
-  Silver: "SI=F",      //  Changed from ETF (SLV) to futures
-  Platinum: "PL=F",    //  Changed from ETF (PPLT) to futures
-  "Crude Oil": "CL=F"  //  Changed from ETF (USO) to futures
+  "Gold": "GC=F",
+  "Silver": "SI=F",
+  "Platinum": "PL=F"
 };
 
 // ✅ Correlation Matrix Assets
@@ -1156,7 +1163,24 @@ app.get("/api/correlation-matrix", async (req, res) => {
    CRYPTO MOVERS
 ------------------------------------------------------ */
 async function fetchEodCryptoMovers() {
-  const cryptoSymbols = {
+  const items = [];
+
+  // ✅ Use WebSocket data first (real-time, within 60 seconds)
+  for (const [symbol, data] of Object.entries(wsCryptoData)) {
+    if (data && Date.now() - data.timestamp < 60 * 1000) {
+      const name = symbol.split("-")[0];
+      items.push(formatMover(name, symbol, data.changePercent, "Crypto"));
+      console.log(`✅ Crypto mover (WS): ${name} ${data.changePercent >= 0 ? "+" : ""}${data.changePercent.toFixed(2)}%`);
+    }
+  }
+
+  // If we have enough WebSocket data, return early
+  if (items.length >= 3) {
+    return items.slice(0, 5); // Return top 5
+  }
+
+  // Fallback to Yahoo data for any missing symbols
+  const yahooSymbols = {
     BTC: "BTC-USD",
     ETH: "ETH-USD",
     XRP: "XRP-USD",
@@ -1164,11 +1188,12 @@ async function fetchEodCryptoMovers() {
     ADA: "ADA-USD"
   };
 
-  const items = [];
+  for (const [name, symbol] of Object.entries(yahooSymbols)) {
+    // Skip if we already have this from WebSocket
+    if (items.some(item => item.symbol === symbol)) continue;
 
-  for (const [name, symbol] of Object.entries(cryptoSymbols)) {
     try {
-      const r = await http.get(`${YAHOO_CHART}/${symbol}?interval=1d&range=5d`);
+      const r = await http.get(`${YAHOO_CHART}/${symbol}?interval=1d&range=5d`, { timeout: 5000 });
       const data = r.data.chart?.result?.[0];
       if (!data) continue;
 
@@ -1184,11 +1209,9 @@ async function fetchEodCryptoMovers() {
     } catch (err) {
       console.warn("⚠️ Crypto mover error:", symbol, err.message);
     }
-
-    await sleep(150);
   }
 
-  return items;
+  return items.slice(0, 5);
 }
 
 /* ------------------------------------------------------
@@ -1197,10 +1220,28 @@ async function fetchEodCryptoMovers() {
 async function fetchCommodityMovers() {
   const items = [];
 
+  // ✅ Use WebSocket data first (real-time, within 60 seconds)
+  for (const [symbol, data] of Object.entries(wsCommodityData)) {
+    if (data && Date.now() - data.timestamp < 60 * 1000) {
+      const name = symbol.replace("USD", "").replace("X", ""); // XAUUSD -> AU, XAGUSD -> AG, etc.
+      items.push(formatMover(name, symbol, data.changePercent, "Commodity"));
+      console.log(`✅ Commodity mover (WS): ${name} ${data.changePercent >= 0 ? "+" : ""}${data.changePercent.toFixed(2)}%`);
+    }
+  }
+
+  // If we have enough WebSocket data, return early
+  if (items.length >= 2) {
+    return items.slice(0, 4); // Return top 4
+  }
+
+  // Fallback to Yahoo data for any missing symbols
   for (const [name, symbol] of Object.entries(YAHOO_COMMODITY_SYMBOLS)) {
+    // Skip if we already have this from WebSocket
+    if (items.some(item => item.name === name)) continue;
+
     try {
       const url = `${YAHOO_CHART}/${symbol}?interval=1d&range=5d`;
-      const r = await http.get(url);
+      const r = await http.get(url, { timeout: 5000 });
       const data = r.data.chart?.result?.[0];
 
       if (!data) continue;
@@ -1210,23 +1251,16 @@ async function fetchCommodityMovers() {
 
       const currentPrice = closes.at(-1);
       const previousPrice = closes.at(-2);
-
-      if (isNaN(currentPrice) || isNaN(previousPrice) || previousPrice === 0) continue;
-
       const pct = ((currentPrice - previousPrice) / previousPrice) * 100;
 
-      if (isNaN(pct)) continue;
-
-      items.push(formatMover(name, name, pct, "Commodity"));
+      items.push(formatMover(name, symbol, pct, "Commodity"));
 
     } catch (err) {
-      console.warn("⚠️ Commodity mover error:", name, err.message);
+      console.warn("⚠️ Commodity mover error:", symbol, err.message);
     }
-
-    await sleep(200);
   }
 
-  return items;
+  return items.slice(0, 4);
 }
 
 /* ------------------------------------------------------
@@ -1269,19 +1303,42 @@ async function fetchEodTopStocks(limit = 6) {
    FOREX MOVERS
 ------------------------------------------------------ */
 async function fetchForexMovers() {
+  const items = [];
+
+  // ✅ Use WebSocket data first (real-time, within 60 seconds)
+  for (const [symbol, data] of Object.entries(wsForexData)) {
+    if (data && Date.now() - data.timestamp < 60 * 1000) {
+      const pair = FOREX_SYMBOL_TO_PAIR[symbol] || symbol;
+      items.push(formatMover(pair, data.symbol, data.changePercent, "Forex"));
+      console.log(`✅ Forex mover (WS): ${pair} ${data.changePercent >= 0 ? "+" : ""}${data.changePercent.toFixed(2)}%`);
+    }
+  }
+
+  // If we have enough WebSocket data, return early
+  if (items.length >= 3) {
+    return items.slice(0, 5); // Return top 5
+  }
+
+  // Fallback to TwelveData API for any missing pairs
   try {
     const url = `https://api.twelvedata.com/quote?symbol=${FOREX_PAIRS.join(",")}&apikey=${TWELVEDATA_KEY}`;
-    const r = await http.get(url);
+    const r = await http.get(url, { timeout: 5000 });
 
-    return FOREX_PAIRS.map(pair => {
+    FOREX_PAIRS.forEach(pair => {
+      // Skip if we already have this from WebSocket
+      if (items.some(item => item.name === pair)) return;
+
       const d = r.data[pair];
-      if (!d?.percent_change) return null;
-      return formatMover(pair, pair, parseFloat(d.percent_change), "Forex");
-    }).filter(Boolean);
+      if (d?.percent_change) {
+        items.push(formatMover(pair, pair, parseFloat(d.percent_change), "Forex"));
+      }
+    });
 
-  } catch {
-    return [];
+  } catch (err) {
+    console.warn("⚠️ Forex movers API error:", err.message);
   }
+
+  return items.slice(0, 5);
 }
 
 /* ------------------------------------------------------
