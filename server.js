@@ -146,6 +146,8 @@ const wsForexData = {
 const forexPrevClose = {};
 const forexRestChangePercent = {};
 const forexRestClose = {};
+const cryptoPrevClose = {};
+const cryptoRestChangePercent = {};
 let forexCache = null;
 let forexCacheTime = 0;
 let heatmapCache = null;
@@ -232,6 +234,40 @@ async function refreshForexPrevClose() {
       }
     } catch (err) {
       console.warn(`⚠️ Prev close fetch error for ${symbol}:`, err.message);
+    }
+
+    await sleep(100);
+  }
+}
+
+async function refreshCryptoPrevClose() {
+  const cryptoSymbols = {
+    "BTC-USD": "BTC-USD.CC",
+    "ETH-USD": "ETH-USD.CC",
+    "XRP-USD": "XRP-USD.CC",
+    "SOL-USD": "SOL-USD.CC",
+    "ADA-USD": "ADA-USD.CC",
+    "DOGE-USD": "DOGE-USD.CC",
+    "AVAX-USD": "AVAX-USD.CC",
+    "BNB-USD": "BNB-USD.CC",
+    "LTC-USD": "LTC-USD.CC"
+  };
+
+  for (const [wsSymbol, apiSymbol] of Object.entries(cryptoSymbols)) {
+    try {
+      const url = `https://eodhd.com/api/real-time/${apiSymbol}?api_token=${EODHD_KEY}&fmt=json`;
+      const r = await http.get(url);
+      const previousClose = parseFloat(r.data?.previousClose);
+      const changePercent = parseFloat(r.data?.change_p);
+      const close = parseFloat(r.data?.close);
+      if (!isNaN(previousClose)) {
+        cryptoPrevClose[wsSymbol] = previousClose;
+      }
+      if (!isNaN(changePercent)) {
+        cryptoRestChangePercent[wsSymbol] = changePercent;
+      }
+    } catch (err) {
+      console.warn(`⚠️ Crypto prev close fetch error for ${apiSymbol}:`, err.message);
     }
 
     await sleep(100);
@@ -769,13 +805,122 @@ app.get("/api/commodity-sentiment", async (req, res) => {
 });
 
 /* ------------------------------------------------------
+   COMMODITIES
+------------------------------------------------------ */
+app.get("/api/commodities", async (req, res) => {
+  try {
+    // Check WebSocket data first (real-time, within 60 seconds)
+    const results = [];
+    for (const [symbol, data] of Object.entries(wsCommodityData)) {
+      if (data && Date.now() - data.timestamp < 60 * 1000) {
+        results.push({
+          name: symbol.replace("USD", "").replace("X", ""), // XAUUSD -> AU, XAGUSD -> AG, etc.
+          symbol,
+          price: data.price.toFixed(2),
+          change: `${data.changePercent >= 0 ? "+" : ""}${data.changePercent.toFixed(2)}%`,
+          trend: data.changePercent >= 0 ? "positive" : "negative",
+          rawChange: data.changePercent
+        });
+        console.log(`✅ ${symbol} (WebSocket): ${data.price.toFixed(2)} (${data.changePercent >= 0 ? "+" : ""}${data.changePercent.toFixed(2)}%)`);
+      }
+    }
+
+    // If we have WebSocket data, return it immediately
+    if (results.length > 0) {
+      return res.json(results);
+    }
+
+    // Fallback to cached Yahoo data
+    if (commoditiesCache && Date.now() - commoditiesCacheTime < GENERIC_TTL) {
+      return res.json(commoditiesCache);
+    }
+
+    // Last resort: fetch fresh Yahoo data
+    const YAHOO_COMMODITIES = {
+      "Gold": "GC=F",
+      "Silver": "SI=F",
+      "Platinum": "PL=F",
+      "Crude Oil": "CL=F"
+    };
+
+    const yahooResults = [];
+
+    for (const [name, symbol] of Object.entries(YAHOO_COMMODITIES)) {
+      try {
+        const url = `${YAHOO_CHART}/${symbol}?interval=1d&range=5d`;
+        const r = await http.get(url);
+        const data = r.data.chart?.result?.[0];
+        if (!data) continue;
+
+        const closes = data.indicators.quote[0].close.filter(n => typeof n === "number");
+        if (closes.length < 2) continue;
+
+        const currentPrice = closes.at(-1);
+        const previousPrice = closes.at(-2);
+        const pct = ((currentPrice - previousPrice) / previousPrice) * 100;
+
+        yahooResults.push({
+          name,
+          symbol,
+          price: currentPrice.toFixed(2),
+          change: `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`,
+          trend: pct >= 0 ? "positive" : "negative",
+          rawChange: pct
+        });
+
+      } catch (err) {
+        console.warn(`⚠️ Commodity fetch error for ${symbol}:`, err.message);
+      }
+
+      await sleep(150);
+    }
+
+    // Cache Yahoo results for fallback
+    commoditiesCache = yahooResults;
+    commoditiesCacheTime = Date.now();
+    res.json(yahooResults);
+
+  } catch (err) {
+    console.error("❌ /api/commodities error:", err.message);
+    res.status(500).json({ error: "Failed to fetch commodities" });
+  }
+});
+
+/* ------------------------------------------------------
    CRYPTO
 ------------------------------------------------------ */
 app.get("/api/crypto", async (req, res) => {
   try {
-    if (cryptoCache && Date.now() - cryptoCacheTime < GENERIC_TTL)
-      return res.json(cryptoCache);
+    // ✅ FIX #1: Serve WebSocket data as initial snapshot
+    const results = [];
 
+    // Check WebSocket data first (real-time, within 60 seconds)
+    for (const [symbol, data] of Object.entries(wsCryptoData)) {
+      if (data && Date.now() - data.timestamp < 60 * 1000) {
+        const name = symbol.split("-")[0];
+        results.push({
+          name,
+          symbol,
+          price: data.price.toFixed(2),
+          change: `${data.changePercent >= 0 ? "+" : ""}${data.changePercent.toFixed(2)}%`,
+          trend: data.changePercent >= 0 ? "positive" : "negative",
+          rawChange: data.changePercent
+        });
+        console.log(`✅ ${name} (WebSocket): ${data.price.toFixed(2)} (${data.changePercent >= 0 ? "+" : ""}${data.changePercent.toFixed(2)}%)`);
+      }
+    }
+
+    // If we have WebSocket data, return it immediately
+    if (results.length > 0) {
+      return res.json(results);
+    }
+
+    // Fallback to cached Yahoo data if no WebSocket data available
+    if (cryptoCache && Date.now() - cryptoCacheTime < GENERIC_TTL) {
+      return res.json(cryptoCache);
+    }
+
+    // Last resort: fetch fresh Yahoo data
     const cryptoSymbols = {
       BTC: "BTC-USD",
       ETH: "ETH-USD",
@@ -788,7 +933,7 @@ app.get("/api/crypto", async (req, res) => {
       LTC: "LTC-USD"
     };
 
-    const results = [];
+    const yahooResults = [];
 
     for (const [name, symbol] of Object.entries(cryptoSymbols)) {
       try {
@@ -804,7 +949,7 @@ app.get("/api/crypto", async (req, res) => {
         const previousPrice = closes.at(-2);
         const pct = ((currentPrice - previousPrice) / previousPrice) * 100;
 
-        results.push({
+        yahooResults.push({
           name,
           symbol,
           price: currentPrice.toFixed(2),
@@ -820,9 +965,10 @@ app.get("/api/crypto", async (req, res) => {
       await sleep(150);
     }
 
-    cryptoCache = results;
+    // Cache Yahoo results for fallback
+    cryptoCache = yahooResults;
     cryptoCacheTime = Date.now();
-    res.json(results);
+    res.json(yahooResults);
 
   } catch (err) {
     console.error("❌ /api/crypto error:", err.message);
@@ -841,8 +987,19 @@ function initCryptoWebSocket() {
     console.log("📡 Connecting to EODHD Crypto WebSocket...");
     ws = new WebSocket(wsUrl);
 
+    // Initialize previous close data on first connect
+    if (Object.keys(cryptoPrevClose).length === 0) {
+      refreshCryptoPrevClose();
+    }
+
     ws.on("open", () => {
       console.log("✅ Crypto WebSocket connected");
+
+      // Refresh previous close data periodically
+      refreshCryptoPrevClose();
+      setInterval(() => {
+        refreshCryptoPrevClose();
+      }, 5 * 60 * 1000); // Every 5 minutes
 
       ws.send(JSON.stringify({
         action: "subscribe",
@@ -858,21 +1015,15 @@ function initCryptoWebSocket() {
         const symbol = msg.s;
         const price = Number(msg.p);
 
-        const prev = cryptoPrevPrice[symbol];
-        let changePercent = null;
-
-        if (Number.isFinite(prev) && prev !== 0) {
-          changePercent = ((price - prev) / prev) * 100;
-        }
+        const prevClose = cryptoPrevClose[symbol];
+        const change = Number.isFinite(prevClose) ? (price - prevClose) : 0;
+        const restPercent = cryptoRestChangePercent[symbol];
+        const changePercent = Number.isFinite(prevClose) && prevClose !== 0
+          ? (change / prevClose) * 100
+          : (restPercent || 0);
 
         // Store current price for next tick
         cryptoPrevPrice[symbol] = price;
-
-        // Skip first tick (no previous price yet)
-        if (!Number.isFinite(changePercent)) {
-          console.log(`₿ CRYPTO ${symbol}: ${price} (warming up)`);
-          return;
-        }
 
         const payload = {
           symbol,
@@ -1702,11 +1853,15 @@ app.get("/api/sa-markets", async (req, res) => {
 // ------------------------------------------------------
 const xml2js = require('xml2js');
 
+// Separate cache for SA news
+let saNewsCache = null;
+let saNewsCacheTime = 0;
+
 app.get("/api/sa-news", async (req, res) => {
   try {
-    // Use cached news if available (5 min cache)
-    if (newsCache && Date.now() - newsCacheTime < 5 * 60 * 1000) {
-      return res.json(newsCache);
+    // Use cached SA news if available (5 min cache)
+    if (saNewsCache && Date.now() - saNewsCacheTime < 5 * 60 * 1000) {
+      return res.json(saNewsCache);
     }
 
     // Fetch and parse BusinessTech RSS feed
@@ -1745,9 +1900,9 @@ app.get("/api/sa-news", async (req, res) => {
       };
     });
 
-    // Save to cache
-    newsCache = transformedNews;
-    newsCacheTime = Date.now();
+    // Save to SA news cache
+    saNewsCache = transformedNews;
+    saNewsCacheTime = Date.now();
 
     res.json(transformedNews);
   } catch (err) {
@@ -2175,6 +2330,61 @@ const wsServer = new WebSocket.Server({ server });
 
 wsServer.on("connection", (socket) => {
   console.log("🔌 Frontend WebSocket client connected");
+
+  // ✅ FIX #2: Push initial snapshots on connect
+  // Send crypto data snapshot
+  for (const [symbol, data] of Object.entries(wsCryptoData)) {
+    if (data) {
+      socket.send(JSON.stringify({
+        type: "crypto",
+        symbol,
+        price: data.price,
+        changePercent: data.changePercent,
+        timestamp: data.timestamp
+      }));
+    }
+  }
+
+  // Send forex data snapshot
+  for (const [symbol, data] of Object.entries(wsForexData)) {
+    if (data) {
+      socket.send(JSON.stringify({
+        type: "forex",
+        symbol: data.symbol,
+        pair: FOREX_SYMBOL_TO_PAIR[symbol] || symbol,
+        price: data.price,
+        change: data.change,
+        changePercent: data.changePercent,
+        timestamp: data.timestamp
+      }));
+    }
+  }
+
+  // Send stock data snapshot
+  for (const [symbol, data] of Object.entries(wsStocksData)) {
+    if (data) {
+      socket.send(JSON.stringify({
+        type: "stock",
+        symbol,
+        price: data.price,
+        changePercent: data.changePercent,
+        timestamp: data.timestamp
+      }));
+    }
+  }
+
+  // Send commodity data snapshot
+  for (const [symbol, data] of Object.entries(wsCommodityData)) {
+    if (data) {
+      socket.send(JSON.stringify({
+        type: "commodity",
+        symbol,
+        price: data.price,
+        changePercent: data.changePercent,
+        timestamp: data.timestamp
+      }));
+    }
+  }
 
   socket.on("close", () => {
     console.log("🔌 Frontend WebSocket client disconnected");
