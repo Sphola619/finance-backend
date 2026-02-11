@@ -2095,134 +2095,173 @@ app.get("/api/jse-stocks", async (req, res) => {
 });
 
 /* ------------------------------------------------------
-   ECONOMIC INDICATORS ENDPOINT
+   ECONOMIC INDICATORS ENDPOINT (EVENT-DRIVEN VERSION)
 ------------------------------------------------------ */
 app.get("/api/economic-indicators", async (req, res) => {
   const now = Date.now();
 
-  // Temporarily disable cache for testing (set to false)
-  if (false && economicIndicatorsCache && (now - economicIndicatorsCacheTime < ECONOMIC_INDICATORS_TTL)) {
-    console.log("✅ Returning cached economic indicators");
-    return res.json(economicIndicatorsCache);
-  }
-
   try {
-    console.log("📊 Fetching economic indicators from EODHD macro-indicator API...");
+    console.log("📊 Fetching economic indicators from EODHD economic-events API...");
 
-    // Country codes and currency mapping
-    const countries = [
-      { currency: 'USD', code: 'USA', name: 'United States' },
-      { currency: 'EUR', code: 'EMU', name: 'Eurozone' }, // Using EMU for Eurozone
-      { currency: 'GBP', code: 'GBR', name: 'United Kingdom' },
-      { currency: 'JPY', code: 'JPN', name: 'Japan' },
-      { currency: 'AUD', code: 'AUS', name: 'Australia' },
-      { currency: 'CAD', code: 'CAN', name: 'Canada' },
-      { currency: 'CHF', code: 'CHE', name: 'Switzerland' },
-      { currency: 'NZD', code: 'NZL', name: 'New Zealand' },
-      { currency: 'ZAR', code: 'ZAF', name: 'South Africa' }
-    ];
+    const today = new Date().toISOString().split("T")[0];
+
+    // Map currency to EODHD economic-events country codes
+    const countryMap = {
+      USD: "US",
+      EUR: "EU",
+      GBP: "GB",
+      JPY: "JP",
+      AUD: "AU",
+      CAD: "CA",
+      CHF: "CH",
+      NZD: "NZ",
+      ZAR: "ZA"
+    };
+
+    const currencies = Object.keys(countryMap);
 
     const indicatorsData = {};
 
-    // Fetch data for each country in parallel
-    const fetchPromises = countries.map(async (country) => {
-      try {
-        console.log(`📊 Fetching ${country.currency} (${country.code}) indicators...`);
+    // ==============================
+    // HELPER: CPI YoY CALCULATOR
+    // ==============================
+    const calculateCPIYoY = (events) => {
+      if (!events || !Array.isArray(events)) return null;
 
-        // Fetch CPI, Unemployment, GDP in parallel
-        const [cpiRes, unemploymentRes, gdpRes] = await Promise.all([
-          axios.get(`https://eodhd.com/api/macro-indicator/${country.code}`, {
-            params: {
-              api_token: EODHD_KEY,
-              indicator: 'inflation_consumer_prices_annual',
-              fmt: 'json'
-            },
-            timeout: 10000
-          }).catch(e => null),
-          axios.get(`https://eodhd.com/api/macro-indicator/${country.code}`, {
-            params: {
-              api_token: EODHD_KEY,
-              indicator: 'unemployment_total_percent',
-              fmt: 'json'
-            },
-            timeout: 10000
-          }).catch(e => null),
-          axios.get(`https://eodhd.com/api/macro-indicator/${country.code}`, {
-            params: {
-              api_token: EODHD_KEY,
-              indicator: 'gdp_growth_annual',
-              fmt: 'json'
-            },
-            timeout: 10000
-          }).catch(e => null)
-        ]);
+      const released = events
+        .filter(e => e.actual !== null)
+        .sort((a, b) => new Date(b.date) - new Date(a.date));
 
-        // Extract latest value from each response
-        const getLatestValue = (response, indicatorName) => {
-          if (response && response.data && Array.isArray(response.data) && response.data.length > 0) {
-            console.log(`📊 ${country.currency} ${indicatorName} raw data:`, response.data.slice(0, 3)); // Log first 3 entries
-            // Sort by date descending and get the most recent
-            const sorted = response.data.sort((a, b) => new Date(b.Date) - new Date(a.Date));
-            const latest = sorted[0];
-            if (latest && latest.Value !== null && latest.Value !== undefined) {
-              return {
-                value: parseFloat(latest.Value),
-                date: latest.Date
-              };
-            }
-          } else {
-            console.log(`📊 ${country.currency} ${indicatorName} response:`, response ? response.data : 'No response');
-          }
-          return null;
-        };
+      if (released.length < 13) return null;
 
-        const cpiData = getLatestValue(cpiRes, 'CPI');
-        const unemploymentData = getLatestValue(unemploymentRes, 'Unemployment');
-        const gdpData = getLatestValue(gdpRes, 'GDP');
+      const latest = released[0];
+      const latestDate = new Date(latest.date);
 
-        indicatorsData[country.currency] = {
-          inflation: cpiData || { value: null, date: null },
-          unemployment: unemploymentData || { value: null, date: null },
-          gdp: gdpData || { value: null, date: null }
-        };
+      const previousYearEvent = released.find(e => {
+        const d = new Date(e.date);
+        return (
+          d.getMonth() === latestDate.getMonth() &&
+          d.getFullYear() === latestDate.getFullYear() - 1
+        );
+      });
 
-        console.log(`✅ ${country.currency}: CPI: ${cpiData?.value}% (${cpiData?.date}), Unemployment: ${unemploymentData?.value}% (${unemploymentData?.date}), GDP: ${gdpData?.value}% (${gdpData?.date})`);
+      if (!previousYearEvent) return null;
 
-      } catch (error) {
-        console.error(`❌ Error fetching ${country.currency} indicators:`, error.message);
-        indicatorsData[country.currency] = {
-          inflation: { value: null, date: null },
-          unemployment: { value: null, date: null },
-          gdp: { value: null, date: null }
-        };
-      }
-    });
+      const yoy =
+        ((latest.actual - previousYearEvent.actual) /
+          previousYearEvent.actual) * 100;
 
-    // Wait for all countries to complete
-    await Promise.all(fetchPromises);
+      return {
+        value: parseFloat(yoy.toFixed(2)),
+        date: latest.date.split(" ")[0]
+      };
+    };
+
+    // ==============================
+    // HELPER: GET LATEST RELEASED VALUE
+    // ==============================
+    const getLatestEventValue = (events) => {
+      if (!events || !Array.isArray(events)) return null;
+
+      const released = events
+        .filter(e => e.actual !== null)
+        .sort((a, b) => new Date(b.date) - new Date(a.date));
+
+      if (!released.length) return null;
+
+      return {
+        value: parseFloat(released[0].actual),
+        date: released[0].date.split(" ")[0]
+      };
+    };
+
+    // ==============================
+    // FETCH DATA FOR EACH COUNTRY
+    // ==============================
+    await Promise.all(
+      currencies.map(async (currency) => {
+        try {
+          const eventCountryCode = countryMap[currency];
+
+          console.log(`📊 Fetching ${currency} economic events...`);
+
+          const [cpiRes, unemploymentRes, gdpRes] = await Promise.all([
+            axios.get("https://eodhd.com/api/economic-events", {
+              params: {
+                api_token: EODHD_KEY,
+                country: eventCountryCode,
+                type: "CPI",
+                from: "2024-01-01",
+                to: today,
+                fmt: "json"
+              }
+            }).catch(() => null),
+
+            axios.get("https://eodhd.com/api/economic-events", {
+              params: {
+                api_token: EODHD_KEY,
+                country: eventCountryCode,
+                type: "Unemployment Rate",
+                from: "2024-01-01",
+                to: today,
+                fmt: "json"
+              }
+            }).catch(() => null),
+
+            axios.get("https://eodhd.com/api/economic-events", {
+              params: {
+                api_token: EODHD_KEY,
+                country: eventCountryCode,
+                type: "GDP Growth Rate",
+                from: "2024-01-01",
+                to: today,
+                fmt: "json"
+              }
+            }).catch(() => null)
+          ]);
+
+          // For South Africa, Canada, and Switzerland, use actual inflation rate directly instead of YoY calculation
+          const cpiData = (currency === 'ZAR' || currency === 'CAD' || currency === 'CHF')
+            ? getLatestEventValue(cpiRes?.data)
+            : calculateCPIYoY(cpiRes?.data);
+          const unemploymentData = getLatestEventValue(unemploymentRes?.data);
+          const gdpData = getLatestEventValue(gdpRes?.data);
+
+          indicatorsData[currency] = {
+            inflation: cpiData ? { value: parseFloat(cpiData.value.toFixed(1)), date: cpiData.date } : { value: null, date: null },
+            unemployment: unemploymentData || { value: null, date: null },
+            gdp: gdpData || { value: null, date: null }
+          };
+
+          console.log(
+            `✅ ${currency}: Inflation: ${cpiData?.value}% (${cpiData?.date}), ` +
+            `Unemployment: ${unemploymentData?.value}% (${unemploymentData?.date}), ` +
+            `GDP: ${gdpData?.value}% (${gdpData?.date})`
+          );
+
+        } catch (error) {
+          console.error(`❌ Error fetching ${currency} data:`, error.message);
+
+          indicatorsData[currency] = {
+            inflation: { value: null, date: null },
+            unemployment: { value: null, date: null },
+            gdp: { value: null, date: null }
+          };
+        }
+      })
+    );
 
     const result = {
       timestamp: new Date().toISOString(),
       indicators: indicatorsData
     };
 
-    // Cache the data
-    economicIndicatorsCache = result;
-    economicIndicatorsCacheTime = now;
-
-    console.log("✅ Economic indicators cached for 30 days");
-    console.log("📊 Final indicators data:", JSON.stringify(indicatorsData, null, 2));
+    console.log("📊 Final economic indicators:", JSON.stringify(result, null, 2));
 
     res.json(result);
 
   } catch (error) {
     console.error("❌ Economic Indicators Error:", error.message);
-
-    // Return cached data if available
-    if (economicIndicatorsCache) {
-      console.log("⚠️ Returning stale cached economic indicators");
-      return res.json({ ...economicIndicatorsCache, stale: true });
-    }
 
     res.status(500).json({
       error: "Failed to fetch economic indicators",
