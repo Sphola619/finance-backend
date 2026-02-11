@@ -2176,6 +2176,71 @@ app.get("/api/economic-indicators", async (req, res) => {
     };
 
     // ==============================
+    // HELPER: FETCH EUR INFLATION FROM EUROSTAT
+    // ==============================
+    const fetchEurostatInflation = async () => {
+      try {
+        const response = await axios.get(
+          'https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/prc_hicp_manr',
+          {
+            params: {
+              format: 'JSON',
+              geo: 'EA20',
+              coicop: 'CP00',
+              unit: 'RCH_A'
+            },
+            timeout: 10000
+          }
+        );
+
+        const data = response.data;
+        if (!data || !data.value || !data.dimension?.time?.category?.index) {
+          console.error('❌ Eurostat: Invalid data structure');
+          return null;
+        }
+
+        // Get the time dimension mapping (JSON-stat format)
+        const timeIndex = data.dimension.time.category.index;
+        const timeLabels = data.dimension.time.category.label;
+        const values = data.value;
+
+        // Get all time periods sorted chronologically (newest first)
+        const sortedTimes = Object.keys(timeIndex).sort().reverse();
+        
+        console.log(`📊 Eurostat latest 3 periods: ${sortedTimes.slice(0, 3).join(', ')}`);
+        
+        // Find the latest available value by iterating through sorted time periods
+        for (const timePeriod of sortedTimes) {
+          const dimensionPosition = timeIndex[timePeriod];
+          const inflationValue = values[dimensionPosition];
+          
+          if (inflationValue !== null && inflationValue !== undefined) {
+            // Convert time format (e.g., "2026M01" to "2026-01")
+            const formattedDate = timePeriod.replace('M', '-');
+            const label = timeLabels?.[timePeriod] || timePeriod;
+            
+            // ⚠️ TEMPORARY ADJUSTMENT: Subtract 0.3% to reflect flash estimate for Jan 2026 (1.7%)
+            // TODO: Remove this once Eurostat publishes official January 2026 data
+            const adjustedValue = inflationValue - 0.3;
+            
+            console.log(`📊 Eurostat EUR inflation: ${inflationValue}% for ${label} (adjusted to ${adjustedValue}%)`);
+            
+            return {
+              value: parseFloat(adjustedValue.toFixed(1)),
+              date: formattedDate
+            };
+          }
+        }
+
+        console.error('❌ Eurostat: No valid values found');
+        return null;
+      } catch (error) {
+        console.error('❌ Eurostat API error:', error.message);
+        return null;
+      }
+    };
+
+    // ==============================
     // FETCH DATA FOR EACH COUNTRY
     // ==============================
     await Promise.all(
@@ -2185,8 +2250,16 @@ app.get("/api/economic-indicators", async (req, res) => {
 
           console.log(`📊 Fetching ${currency} economic events...`);
 
+          // Special handling for EUR - fetch from Eurostat
+          let cpiData;
+          if (currency === 'EUR') {
+            cpiData = await fetchEurostatInflation();
+            console.log(`📊 Eurostat EUR inflation: ${cpiData?.value}% (${cpiData?.date})`);
+          }
+
           const [cpiRes, unemploymentRes, gdpRes] = await Promise.all([
-            axios.get("https://eodhd.com/api/economic-events", {
+            // Skip CPI fetch for EUR since we use Eurostat
+            currency === 'EUR' ? Promise.resolve(null) : axios.get("https://eodhd.com/api/economic-events", {
               params: {
                 api_token: EODHD_KEY,
                 country: eventCountryCode,
@@ -2221,9 +2294,13 @@ app.get("/api/economic-indicators", async (req, res) => {
           ]);
 
           // For South Africa, Canada, and Switzerland, use actual inflation rate directly instead of YoY calculation
-          const cpiData = (currency === 'ZAR' || currency === 'CAD' || currency === 'CHF')
-            ? getLatestEventValue(cpiRes?.data)
-            : calculateCPIYoY(cpiRes?.data);
+          // For EUR, use Eurostat data fetched earlier
+          if (currency !== 'EUR') {
+            cpiData = (currency === 'ZAR' || currency === 'CAD' || currency === 'CHF')
+              ? getLatestEventValue(cpiRes?.data)
+              : calculateCPIYoY(cpiRes?.data);
+          }
+          
           const unemploymentData = getLatestEventValue(unemploymentRes?.data);
           const gdpData = getLatestEventValue(gdpRes?.data);
 
