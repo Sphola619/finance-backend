@@ -2293,10 +2293,10 @@ app.get("/api/economic-indicators", async (req, res) => {
             }).catch(() => null)
           ]);
 
-          // For South Africa, Canada, and Switzerland, use actual inflation rate directly instead of YoY calculation
+          // For South Africa, Canada, Switzerland, and Japan, use actual inflation rate directly instead of YoY calculation
           // For EUR, use Eurostat data fetched earlier
           if (currency !== 'EUR') {
-            cpiData = (currency === 'ZAR' || currency === 'CAD' || currency === 'CHF')
+            cpiData = (currency === 'ZAR' || currency === 'CAD' || currency === 'CHF' || currency === 'JPY')
               ? getLatestEventValue(cpiRes?.data)
               : calculateCPIYoY(cpiRes?.data);
           }
