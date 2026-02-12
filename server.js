@@ -1918,10 +1918,61 @@ app.get("/api/sa-markets", async (req, res) => {
 // SA MARKET NEWS - BusinessTech RSS Feed
 // ------------------------------------------------------
 const xml2js = require('xml2js');
+const cheerio = require('cheerio');
 
 // Separate cache for SA news
 let saNewsCache = null;
 let saNewsCacheTime = 0;
+
+// Helper function to extract image from RSS item or article page
+async function extractArticleImage(item) {
+  try {
+    // Method 1: Check for media:content or media:thumbnail in RSS
+    if (item['media:content'] && item['media:content']['$'] && item['media:content']['$'].url) {
+      return item['media:content']['$'].url;
+    }
+    if (item['media:thumbnail'] && item['media:thumbnail']['$'] && item['media:thumbnail']['$'].url) {
+      return item['media:thumbnail']['$'].url;
+    }
+
+    // Method 2: Check for enclosure tag
+    if (item.enclosure && item.enclosure['$'] && item.enclosure['$'].url) {
+      return item.enclosure['$'].url;
+    }
+
+    // Method 3: Parse description HTML for embedded images
+    if (item.description) {
+      const $ = cheerio.load(item.description);
+      const img = $('img').first();
+      if (img.length && img.attr('src')) {
+        return img.attr('src');
+      }
+    }
+
+    // Method 4: Fallback - scrape og:image from article page
+    if (item.link) {
+      const articleResponse = await axios.get(item.link, { timeout: 5000 });
+      const $ = cheerio.load(articleResponse.data);
+      
+      // Try Open Graph image
+      const ogImage = $('meta[property="og:image"]').attr('content');
+      if (ogImage) return ogImage;
+      
+      // Try Twitter card image
+      const twitterImage = $('meta[name="twitter:image"]').attr('content');
+      if (twitterImage) return twitterImage;
+      
+      // Try first article image
+      const firstImg = $('article img').first().attr('src');
+      if (firstImg) return firstImg;
+    }
+
+    return null;
+  } catch (error) {
+    console.warn(`⚠️ Failed to extract image for article: ${item.link}`, error.message);
+    return null;
+  }
+}
 
 app.get("/api/sa-news", async (req, res) => {
   try {
@@ -1939,12 +1990,17 @@ app.get("/api/sa-news", async (req, res) => {
     const items = feed.rss && feed.rss.channel && feed.rss.channel.item ? feed.rss.channel.item : [];
 
     // Transform RSS items to match frontend expectations
-    const transformedNews = (Array.isArray(items) ? items : [items]).map(item => {
+    const itemsArray = Array.isArray(items) ? items : [items];
+    const transformedNews = await Promise.all(itemsArray.map(async item => {
       // Defensive checks for missing fields
       const headline = item.title || "Untitled";
       const summary = item.description || headline;
       const url = item.link || "https://businesstech.co.za/news/";
       const source = "BusinessTech";
+      
+      // Extract image
+      const image = await extractArticleImage(item);
+      
       let datetime;
       if (item.pubDate) {
         const parsedDate = new Date(item.pubDate);
@@ -1962,9 +2018,10 @@ app.get("/api/sa-news", async (req, res) => {
         source,
         url,
         datetime,
+        image: image || null,
         symbols: []
       };
-    });
+    }));
 
     // Save to SA news cache
     saNewsCache = transformedNews;
