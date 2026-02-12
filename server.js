@@ -1406,6 +1406,7 @@ app.get("/api/forex-heatmap", async (req, res) => {
 
     // Forex heatmap symbols - consistent with crypto heatmap approach
     const forexSymbols = {
+      "DXY (US Dollar Index)": "DX-Y.NYB",
       "EUR/USD": "EURUSD=X",
       "GBP/USD": "GBPUSD=X",
       "USD/JPY": "USDJPY=X",
