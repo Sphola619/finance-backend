@@ -2176,6 +2176,41 @@ app.get("/api/economic-indicators", async (req, res) => {
     };
 
     // ==============================
+    // HELPER: GET LATEST + PREVIOUS VALUES (USING EODHD's "previous" FIELD)
+    // ==============================
+    const getLatestAndPreviousValues = (events, comparisonFilter = null) => {
+      if (!events || !Array.isArray(events)) return null;
+
+      // Filter by comparison type if specified (e.g., "qoq" for GDP)
+      let filtered = events.filter(e => e.actual !== null);
+      
+      if (comparisonFilter) {
+        filtered = filtered.filter(e => e.comparison === comparisonFilter);
+      }
+
+      // Sort by release date (most recent first)
+      const released = filtered.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+      if (!released.length) return null;
+
+      // Get the latest release (most recent revision)
+      const latestEvent = released[0];
+
+      const latest = {
+        value: parseFloat(latestEvent.actual),
+        date: latestEvent.date.split(" ")[0]
+      };
+
+      // Use EODHD's "previous" field which already contains the correct previous period value
+      const previous = latestEvent.previous !== null && latestEvent.previous !== undefined ? {
+        value: parseFloat(latestEvent.previous),
+        date: null // Previous period date not provided by EODHD in this field
+      } : null;
+
+      return { latest, previous };
+    };
+
+    // ==============================
     // HELPER: FETCH EUR INFLATION FROM EUROSTAT
     // ==============================
     const fetchEurostatInflation = async () => {
@@ -2301,19 +2336,27 @@ app.get("/api/economic-indicators", async (req, res) => {
               : calculateCPIYoY(cpiRes?.data);
           }
           
-          const unemploymentData = getLatestEventValue(unemploymentRes?.data);
-          const gdpData = getLatestEventValue(gdpRes?.data);
+          const unemploymentData = getLatestAndPreviousValues(unemploymentRes?.data);
+          const gdpData = getLatestAndPreviousValues(gdpRes?.data, 'qoq'); // ✅ Filter for QoQ only
 
           indicatorsData[currency] = {
             inflation: cpiData ? { value: parseFloat(cpiData.value.toFixed(1)), date: cpiData.date } : { value: null, date: null },
-            unemployment: unemploymentData || { value: null, date: null },
-            gdp: gdpData || { value: null, date: null }
+            unemployment: unemploymentData ? {
+              current: unemploymentData.latest.value,
+              previous: unemploymentData.previous?.value || null,
+              date: unemploymentData.latest.date
+            } : { current: null, previous: null, date: null },
+            gdp: gdpData ? {
+              current: gdpData.latest.value,
+              previous: gdpData.previous?.value || null,
+              date: gdpData.latest.date
+            } : { current: null, previous: null, date: null }
           };
 
           console.log(
             `✅ ${currency}: Inflation: ${cpiData?.value}% (${cpiData?.date}), ` +
-            `Unemployment: ${unemploymentData?.value}% (${unemploymentData?.date}), ` +
-            `GDP: ${gdpData?.value}% (${gdpData?.date})`
+            `Unemployment: ${unemploymentData?.latest?.value}% → ${unemploymentData?.previous?.value}% (${unemploymentData?.latest?.date}), ` +
+            `GDP (QoQ): ${gdpData?.latest?.value}% → ${gdpData?.previous?.value}% (${gdpData?.latest?.date})`
           );
 
         } catch (error) {
