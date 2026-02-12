@@ -1493,6 +1493,141 @@ app.get("/api/forex-heatmap", async (req, res) => {
 });
 
 /* ------------------------------------------------------
+   BOND YIELDS
+------------------------------------------------------ */
+let bondYieldsCache = null;
+let bondYieldsCacheTime = 0;
+const BOND_YIELDS_TTL = 60 * 60 * 1000; // 1 hour cache
+
+app.get("/api/bond-yields", async (req, res) => {
+  try {
+    // Return cached data if available
+    if (bondYieldsCache && Date.now() - bondYieldsCacheTime < BOND_YIELDS_TTL) {
+      return res.json(bondYieldsCache);
+    }
+
+    const bondSymbols = {
+      "USA": { 
+        "2Y": "US2Y.GBOND", 
+        "10Y": "US10Y.GBOND"
+      },
+      "Germany": { 
+        "2Y": "DE2Y.GBOND", 
+        "10Y": "DE10Y.GBOND" 
+      },
+      "UK": { 
+        "2Y": "GB2Y.GBOND", 
+        "10Y": "GB10Y.GBOND" 
+      },
+      "Japan": { 
+        "2Y": "JP2Y.GBOND", 
+        "10Y": "JP10Y.GBOND" 
+      },
+      "Australia": { 
+        "2Y": "AU2Y.GBOND", 
+        "10Y": "AU10Y.GBOND" 
+      },
+      "New Zealand": { 
+        "2Y": "NZ2Y.GBOND", 
+        "10Y": "NZ10Y.GBOND" 
+      },
+      "South Africa": { 
+        "2Y": "ZA2Y.GBOND", 
+        "10Y": "ZA10Y.GBOND" 
+      }
+    };
+
+    const flags = {
+      "USA": "🇺🇸",
+      "Germany": "🇩🇪",
+      "UK": "🇬🇧",
+      "Japan": "🇯🇵",
+      "Australia": "🇦🇺",
+      "New Zealand": "🇳🇿",
+      "South Africa": "🇿🇦"
+    };
+
+    const results = [];
+
+    for (const [country, symbols] of Object.entries(bondSymbols)) {
+      try {
+        // Fetch 2Y and 10Y yields from EODHD
+        const [data2Y, data10Y] = await Promise.all([
+          axios.get(`https://eodhd.com/api/eod/${symbols["2Y"]}`, {
+            params: {
+              api_token: EODHD_KEY,
+              fmt: 'json',
+              order: 'd'
+            },
+            timeout: 10000
+          }),
+          axios.get(`https://eodhd.com/api/eod/${symbols["10Y"]}`, {
+            params: {
+              api_token: EODHD_KEY,
+              fmt: 'json',
+              order: 'd'
+            },
+            timeout: 10000
+          })
+        ]);
+
+        // EODHD returns array of historical data, latest is first (order: 'd')
+        if (data2Y.data && Array.isArray(data2Y.data) && data2Y.data.length >= 2 &&
+            data10Y.data && Array.isArray(data10Y.data) && data10Y.data.length >= 2) {
+          
+          // Sort by date to ensure we have the latest first
+          const sorted2Y = data2Y.data.sort((a, b) => new Date(b.date) - new Date(a.date));
+          const sorted10Y = data10Y.data.sort((a, b) => new Date(b.date) - new Date(a.date));
+          
+          // Check if data is recent (within 30 days)
+          const latestDate = new Date(sorted10Y[0].date);
+          const daysSinceUpdate = (Date.now() - latestDate.getTime()) / (1000 * 60 * 60 * 24);
+          
+          if (daysSinceUpdate > 30) {
+            console.warn(`⚠️ Skipping ${country}: Data is ${Math.floor(daysSinceUpdate)} days old (${sorted10Y[0].date})`);
+            await sleep(200);
+            continue;
+          }
+          
+          const latest2Y = sorted2Y[0].close;
+          const previous2Y = sorted2Y[1].close;
+          const latest10Y = sorted10Y[0].close;
+          const previous10Y = sorted10Y[1].close;
+
+          const spread = latest10Y - latest2Y;
+          const change10Y = latest10Y - previous10Y;
+
+          results.push({
+            country,
+            flag: flags[country],
+            yield2Y: latest2Y.toFixed(2),
+            yield10Y: latest10Y.toFixed(2),
+            spread: spread.toFixed(2),
+            change24h: change10Y.toFixed(2),
+            isInverted: spread < 0
+          });
+
+          console.log(`✅ Bond yields loaded for ${country}: 2Y=${latest2Y.toFixed(2)}%, 10Y=${latest10Y.toFixed(2)}%, Spread=${spread.toFixed(2)}% (Date: ${sorted10Y[0].date})`);
+        }
+
+        await sleep(200); // Small delay between countries
+      } catch (err) {
+        console.warn(`⚠️ Bond yield error for ${country}:`, err.message);
+      }
+    }
+
+    bondYieldsCache = results;
+    bondYieldsCacheTime = Date.now();
+
+    console.log(`✅ Loaded ${results.length} bond yields from EODHD`);
+    res.json(results);
+  } catch (err) {
+    console.error("❌ /api/bond-yields error:", err.message);
+    res.status(500).json({ error: "Failed to load bond yields" });
+  }
+});
+
+/* ------------------------------------------------------
    CRYPTO HEATMAP
 ------------------------------------------------------ */
 app.get("/api/crypto-heatmap", async (req, res) => {
